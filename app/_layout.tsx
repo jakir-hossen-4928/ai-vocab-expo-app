@@ -14,6 +14,7 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { subscribeToDataChanges, unsubscribeFromDataChanges } from '@/services/api';
 import { initDatabase } from '@/services/offlineStorage';
 import { queryClient } from '@/services/queryClient';
+import { RealmProvider } from '@/services/realm';
 import { migrateSecureStoreData } from '@/services/storage';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -168,30 +169,32 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <ErrorBoundary>
-        <QueryClientProvider client={queryClient}>
-          <ThemeProvider value={colorScheme === 'dark' ? BlueDarkTheme : LightTheme}>
-            <Stack screenOptions={{ headerShown: false }}>
-              <Stack.Screen name="index" />
-              <Stack.Screen name="(drawer)" />
-              {/* Detail Screens - These are outside drawer */}
-              <Stack.Screen
-                name="details/vocabulary/[id]"
-                options={{
-                  presentation: 'card',
-                  animation: 'slide_from_right',
-                }}
-              />
-              <Stack.Screen
-                name="details/resource/[id]"
-                options={{
-                  presentation: 'card',
-                  animation: 'slide_from_right',
-                }}
-              />
-            </Stack>
-            <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
-          </ThemeProvider>
-        </QueryClientProvider>
+        <RealmProvider>
+          <QueryClientProvider client={queryClient}>
+            <ThemeProvider value={colorScheme === 'dark' ? BlueDarkTheme : LightTheme}>
+              <Stack screenOptions={{ headerShown: false }}>
+                <Stack.Screen name="index" />
+                <Stack.Screen name="(drawer)" />
+                {/* Detail Screens - These are outside drawer */}
+                <Stack.Screen
+                  name="details/vocabulary/[id]"
+                  options={{
+                    presentation: 'card',
+                    animation: 'slide_from_right',
+                  }}
+                />
+                <Stack.Screen
+                  name="details/resource/[id]"
+                  options={{
+                    presentation: 'card',
+                    animation: 'slide_from_right',
+                  }}
+                />
+              </Stack>
+              <StatusBar style={colorScheme === 'dark' ? 'light' : 'dark'} />
+            </ThemeProvider>
+          </QueryClientProvider>
+        </RealmProvider>
       </ErrorBoundary>
     </SafeAreaProvider>
   );
