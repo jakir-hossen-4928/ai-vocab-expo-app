@@ -82,6 +82,7 @@ export interface Resource {
     createdAt?: string; // For compatibility
     updatedAt?: string; // For compatibility
     userId?: string;
+    isBookmarked?: boolean;
 }
 
 // User Types

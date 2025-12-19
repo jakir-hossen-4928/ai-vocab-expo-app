@@ -1,13 +1,11 @@
 import type { Resource as ResourceType, Vocabulary as VocabularyType } from '@/types';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SQLite from 'expo-sqlite';
-import Realm from 'realm';
-import { FlashcardActivity, getRealm, LearningProgress, Resource, SearchCache, SyncMetadata, Vocabulary } from './realm';
 
-let realmInstance: Realm | null = null;
+let db: SQLite.SQLiteDatabase | null = null;
 let initPromise: Promise<void> | null = null;
 
-// Cache expiry: 30 minutes (aligned with web app for better sync)
+// Cache expiry: 30 minutes
 const CACHE_EXPIRY_MS = 1000 * 60 * 30;
 
 export const initDatabase = async () => {
@@ -15,115 +13,97 @@ export const initDatabase = async () => {
 
     initPromise = (async () => {
         try {
-            realmInstance = await getRealm();
+            db = await SQLite.openDatabaseAsync('vocab.db');
 
-            // 1. Perform Legacy Data Migration (SQLite -> Realm)
-            await performLegacyMigration();
+            // 1. Create Tables
+            await db.execAsync(`
+                CREATE TABLE IF NOT EXISTS vocabularies (
+                    id TEXT PRIMARY KEY,
+                    english TEXT NOT NULL,
+                    bangla TEXT NOT NULL,
+                    partOfSpeech TEXT,
+                    pronunciation TEXT,
+                    examples TEXT, -- JSON string
+                    synonyms TEXT, -- JSON string
+                    antonyms TEXT, -- JSON string
+                    explanation TEXT,
+                    meaning TEXT,
+                    difficulty_level TEXT,
+                    origin TEXT,
+                    audioUrl TEXT,
+                    verbForms TEXT, -- JSON string
+                    relatedWords TEXT, -- JSON string
+                    userId TEXT,
+                    cachedAt INTEGER,
+                    updatedAtTs INTEGER,
+                    isFavorite INTEGER DEFAULT 0,
+                    createdAt TEXT,
+                    updatedAt TEXT
+                );
+                
+                CREATE TABLE IF NOT EXISTS resources (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    description TEXT,
+                    imageUrl TEXT,
+                    thumbnailUrl TEXT,
+                    link TEXT,
+                    type TEXT,
+                    userId TEXT,
+                    cachedAt INTEGER,
+                    updatedAtTs INTEGER,
+                    isBookmarked INTEGER DEFAULT 0,
+                    createdAt TEXT,
+                    updatedAt TEXT
+                );
 
-            // 2. Force one-time resync to fix transition if needed (already handled by migration v5 marker)
-            const resyncCheck = realmInstance.objectForPrimaryKey(SyncMetadata, 'vocabularies_resync_v5');
-            if (!resyncCheck) {
-                console.log('🔄 Realm Transition: Clearing local cache for a fresh deep sync...');
-                realmInstance.write(() => {
-                    realmInstance!.delete(realmInstance!.objects(Vocabulary));
-                    realmInstance!.delete(realmInstance!.objects(SyncMetadata));
-                    realmInstance!.create(SyncMetadata, {
-                        collection: 'vocabularies_resync_v5',
-                        lastSync: Date.now(),
-                        itemCount: 0
-                    });
-                });
-            }
+                CREATE TABLE IF NOT EXISTS sync_metadata (
+                    collection TEXT PRIMARY KEY,
+                    lastSync INTEGER,
+                    itemCount INTEGER
+                );
 
-            console.log('✅ Realm Database initialized with offline-first schemas');
+                CREATE TABLE IF NOT EXISTS learning_progress (
+                    vocabularyId TEXT PRIMARY KEY,
+                    status TEXT DEFAULT 'new',
+                    nextReview INTEGER DEFAULT 0,
+                    interval INTEGER DEFAULT 0,
+                    easeFactor REAL DEFAULT 2.5,
+                    repetitions INTEGER DEFAULT 0,
+                    lastReviewed INTEGER DEFAULT 0,
+                    isDifficult INTEGER DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS flashcard_activity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vocabularyId TEXT,
+                    action TEXT,
+                    timestamp INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS search_cache (
+                    query TEXT PRIMARY KEY,
+                    result TEXT, -- JSON string
+                    updatedAt INTEGER
+                );
+
+                -- Indexes for performance
+                CREATE INDEX IF NOT EXISTS idx_vocab_english ON vocabularies(english);
+                CREATE INDEX IF NOT EXISTS idx_vocab_pos ON vocabularies(partOfSpeech);
+                CREATE INDEX IF NOT EXISTS idx_vocab_updated ON vocabularies(updatedAtTs);
+                CREATE INDEX IF NOT EXISTS idx_resource_updated ON resources(updatedAtTs);
+                CREATE INDEX IF NOT EXISTS idx_progress_next ON learning_progress(nextReview);
+            `);
+
+            console.log('✅ SQLite Database initialized with full field support');
         } catch (error) {
-            console.error('❌ Error initializing Realm database:', error);
+            console.error('❌ Error initializing SQLite database:', error);
             initPromise = null;
             throw error;
         }
     })();
 
     return initPromise;
-};
-
-const performLegacyMigration = async () => {
-    const MIGRATION_KEY = 'sqlite_to_realm_migration_v1';
-    const isMigrated = await AsyncStorage.getItem(MIGRATION_KEY);
-    if (isMigrated === 'true') return;
-
-    console.log('📦 Starting Legacy Data Migration (SQLite -> Realm)...');
-    let legacyDb: SQLite.SQLiteDatabase | null = null;
-
-    try {
-        legacyDb = await SQLite.openDatabaseAsync('vocab.db');
-
-        // --- 1. Migrate Favorites ---
-        const favorites: any[] = await legacyDb.getAllAsync('SELECT vocabulary_id FROM favorites');
-        if (favorites.length > 0) {
-            console.log(`⭐ Migrating ${favorites.length} favorites...`);
-            realmInstance!.write(() => {
-                favorites.forEach(fav => {
-                    const vocab = realmInstance!.objectForPrimaryKey(Vocabulary, fav.vocabulary_id);
-                    if (vocab) vocab.isFavorite = true;
-                });
-            });
-        }
-
-        // --- 2. Migrate Bookmarks ---
-        const bookmarks: any[] = await legacyDb.getAllAsync('SELECT resource_id FROM bookmarks');
-        if (bookmarks.length > 0) {
-            console.log(`🔖 Migrating ${bookmarks.length} bookmarks...`);
-            realmInstance!.write(() => {
-                bookmarks.forEach(bm => {
-                    const res = realmInstance!.objectForPrimaryKey(Resource, bm.resource_id);
-                    if (res) res.isBookmarked = true;
-                });
-            });
-        }
-
-        // --- 3. Migrate Learning Progress (SRS) ---
-        const progress: any[] = await legacyDb.getAllAsync('SELECT * FROM vocabulary_learning_progress');
-        if (progress.length > 0) {
-            console.log(`📈 Migrating ${progress.length} SRS progress records...`);
-            realmInstance!.write(() => {
-                progress.forEach(p => {
-                    realmInstance!.create(LearningProgress, {
-                        vocabularyId: p.vocabulary_id,
-                        status: p.status,
-                        nextReview: p.next_review,
-                        interval: p.interval,
-                        easeFactor: p.ease_factor,
-                        repetitions: p.repetitions,
-                        lastReviewed: p.last_reviewed,
-                        isDifficult: p.is_difficult === 1
-                    }, Realm.UpdateMode.Modified);
-                });
-            });
-        }
-
-        // --- 4. Migrate Flashcard Activity ---
-        const activity: any[] = await legacyDb.getAllAsync('SELECT * FROM flashcard_activity');
-        if (activity.length > 0) {
-            console.log(`⏱️ Migrating ${activity.length} activity logs...`);
-            realmInstance!.write(() => {
-                activity.forEach(a => {
-                    realmInstance!.create(FlashcardActivity, {
-                        id: Math.floor(a.timestamp + Math.random() * 1000), // Ensure unique integer ID
-                        vocabularyId: a.vocabulary_id,
-                        action: a.action,
-                        timestamp: a.timestamp
-                    }, Realm.UpdateMode.Modified);
-                });
-            });
-        }
-
-        await AsyncStorage.setItem(MIGRATION_KEY, 'true');
-        console.log('✅ Legacy migration completed successfully.');
-    } catch (error) {
-        console.warn('⚠️ Legacy migration skipped or failed (likely no old DB):', error);
-        // We still mark as migrated to avoid repeated failed attempts
-        await AsyncStorage.setItem(MIGRATION_KEY, 'true');
-    }
 };
 
 // Queue for database write operations
@@ -147,661 +127,751 @@ const queueWrite = async <T>(operation: () => Promise<T>): Promise<T> => {
 // ===== VOCABULARIES =====
 
 export const cacheVocabularies = async (vocabularies: VocabularyType[]) => {
-    if (!realmInstance) await initDatabase();
+    if (!db) await initDatabase();
+    if (!db) return;
+
+    return queueWrite(async () => {
+        try {
+            const now = Date.now();
+            await db!.withTransactionAsync(async () => {
+                for (const v of vocabularies) {
+                    const updatedAtTs = new Date(v.updatedAt || v.updated_at || v.createdAt || v.created_at || now).getTime();
+
+                    await db!.runAsync(
+                        `INSERT OR REPLACE INTO vocabularies (
+                            id, english, bangla, partOfSpeech, pronunciation, 
+                            examples, synonyms, antonyms, explanation, meaning, 
+                            difficulty_level, origin, audioUrl, verbForms, 
+                            relatedWords, userId, cachedAt, updatedAtTs, 
+                            isFavorite, createdAt, updatedAt
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        [
+                            v.id,
+                            v.english || '',
+                            v.bangla || '',
+                            v.partOfSpeech?.toLowerCase() || 'noun',
+                            v.pronunciation || null,
+                            v.examples ? JSON.stringify(v.examples) : null,
+                            v.synonyms ? JSON.stringify(v.synonyms) : null,
+                            v.antonyms ? JSON.stringify(v.antonyms) : null,
+                            v.explanation || null,
+                            v.meaning || null,
+                            v.difficulty_level || null,
+                            v.origin || null,
+                            v.audioUrl || null,
+                            v.verbForms ? JSON.stringify(v.verbForms) : null,
+                            v.relatedWords ? JSON.stringify(v.relatedWords) : null,
+                            v.userId || null,
+                            now,
+                            updatedAtTs,
+                            v.isFavorite ? 1 : 0,
+                            v.createdAt || (v.created_at?.toISOString ? v.created_at.toISOString() : null),
+                            v.updatedAt || (v.updated_at?.toISOString ? v.updated_at.toISOString() : null)
+                        ]
+                    );
+                }
+
+                // Update metadata
+                await db!.runAsync(
+                    'INSERT OR REPLACE INTO sync_metadata (collection, lastSync, itemCount) VALUES (?, ?, ?)',
+                    ['vocabularies', now, vocabularies.length]
+                );
+            });
+
+            console.log(`✅ SQLite: Cached ${vocabularies.length} vocabularies.`);
+        } catch (error) {
+            console.error('❌ Error caching vocabularies in SQLite:', error);
+            throw error;
+        }
+    });
 };
 
 export const getCachedVocabularies = async (options?: { partOfSpeech?: string; search?: string; onlyFavorites?: boolean }): Promise<{ data: VocabularyType[], isStale: boolean }> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return { data: [], isStale: true };
+    if (!db) await initDatabase();
+    if (!db) return { data: [], isStale: true };
 
     try {
-        const metadata = realmInstance.objectForPrimaryKey(SyncMetadata, 'vocabularies');
+        const metadata: any = await db.getFirstAsync('SELECT * FROM sync_metadata WHERE collection = ?', ['vocabularies']);
         const isStale = !metadata || (Date.now() - metadata.lastSync > CACHE_EXPIRY_MS);
 
-        // Diagnostic: Log total count
-        const totalCount = realmInstance.objects(Vocabulary).length;
-        console.log(`📊 Realm Database: ${totalCount} vocabularies found in cache.`);
-
-        let results = realmInstance.objects(Vocabulary);
+        let queryStr = 'SELECT * FROM vocabularies';
+        let params: any[] = [];
+        let conditions: string[] = [];
 
         if (options?.onlyFavorites) {
-            results = results.filtered('isFavorite == true');
+            conditions.push('isFavorite = 1');
         }
 
         if (options?.partOfSpeech && options.partOfSpeech !== 'all') {
-            results = results.filtered('partOfSpeech == $0', options.partOfSpeech.toLowerCase());
+            conditions.push('partOfSpeech = ?');
+            params.push(options.partOfSpeech.toLowerCase());
         }
 
         if (options?.search) {
-            const searchTerm = options.search.trim().toLowerCase();
-            results = results.filtered('english CONTAINS[c] $0 OR bangla CONTAINS[c] $0', searchTerm);
-            console.log(`🔍 Realm Searching for: "${searchTerm}"`);
+            conditions.push('(english LIKE ? OR bangla LIKE ?)');
+            const searchPattern = `%${options.search.trim().toLowerCase()}%`;
+            params.push(searchPattern, searchPattern);
+        }
+
+        if (conditions.length > 0) {
+            queryStr += ' WHERE ' + conditions.join(' AND ');
         }
 
         // Sorting
-        const sortedResults = options?.onlyFavorites
-            ? results.sorted('updatedAtTs', true)
-            : results.sorted([['updatedAtTs', true], ['id', true]]);
+        if (options?.onlyFavorites) {
+            queryStr += ' ORDER BY updatedAtTs DESC';
+        } else {
+            queryStr += ' ORDER BY updatedAtTs DESC, id ASC';
+        }
 
-        const data = sortedResults.map(v => JSON.parse(v.data) as VocabularyType);
+        const rows: any[] = await db.getAllAsync(queryStr, params);
+
+        const data = rows.map(v => ({
+            id: v.id,
+            english: v.english,
+            bangla: v.bangla,
+            partOfSpeech: v.partOfSpeech,
+            pronunciation: v.pronunciation,
+            examples: v.examples ? JSON.parse(v.examples) : [],
+            synonyms: v.synonyms ? JSON.parse(v.synonyms) : [],
+            antonyms: v.antonyms ? JSON.parse(v.antonyms) : [],
+            explanation: v.explanation,
+            meaning: v.meaning,
+            difficulty_level: v.difficulty_level,
+            origin: v.origin,
+            audioUrl: v.audioUrl,
+            verbForms: v.verbForms ? JSON.parse(v.verbForms) : undefined,
+            relatedWords: v.relatedWords ? JSON.parse(v.relatedWords) : [],
+            userId: v.userId,
+            createdAt: v.createdAt,
+            updatedAt: v.updatedAt,
+            isFavorite: v.isFavorite === 1
+        } as VocabularyType));
 
         return { data, isStale };
     } catch (error) {
-        console.error('❌ Error getting cached vocabularies from Realm:', error);
+        console.error('❌ Error getting cached vocabularies from SQLite:', error);
         return { data: [], isStale: true };
+    }
+};
+
+export const getVocabularyByIdFromCache = async (id: string): Promise<VocabularyType | null> => {
+    if (!db) await initDatabase();
+    if (!db) return null;
+
+    try {
+        const v: any = await db.getFirstAsync('SELECT * FROM vocabularies WHERE id = ?', [id]);
+        if (!v) return null;
+
+        return {
+            id: v.id,
+            english: v.english,
+            bangla: v.bangla,
+            partOfSpeech: v.partOfSpeech,
+            pronunciation: v.pronunciation,
+            examples: v.examples ? JSON.parse(v.examples) : [],
+            synonyms: v.synonyms ? JSON.parse(v.synonyms) : [],
+            antonyms: v.antonyms ? JSON.parse(v.antonyms) : [],
+            explanation: v.explanation,
+            meaning: v.meaning,
+            difficulty_level: v.difficulty_level,
+            origin: v.origin,
+            audioUrl: v.audioUrl,
+            verbForms: v.verbForms ? JSON.parse(v.verbForms) : undefined,
+            relatedWords: v.relatedWords ? JSON.parse(v.relatedWords) : [],
+            userId: v.userId,
+            createdAt: v.createdAt,
+            updatedAt: v.updatedAt,
+            isFavorite: v.isFavorite === 1
+        } as VocabularyType;
+    } catch (error) {
+        console.error('❌ Error getting vocabulary from SQLite:', error);
+        return null;
     }
 };
 
 // ===== RESOURCES =====
 
 export const cacheResources = async (resources: ResourceType[]) => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return;
+    if (!db) await initDatabase();
+    if (!db) return;
 
     return queueWrite(async () => {
         try {
             const now = Date.now();
+            await db!.withTransactionAsync(async () => {
+                for (const r of resources) {
+                    const updatedAtTs = new Date(r.updatedAt || r.updated_at || r.createdAt || r.created_at || now).getTime();
 
-            realmInstance!.write(() => {
-                for (const resourceData of resources) {
-                    const updatedAt = new Date(resourceData.createdAt || resourceData.created_at || 0).getTime();
-                    realmInstance!.create('Resource', {
-                        id: resourceData.id,
-                        title: resourceData.title || null,
-                        description: resourceData.description || null,
-                        data: JSON.stringify(resourceData),
-                        cachedAt: now,
-                        updatedAtTs: updatedAt
-                    }, Realm.UpdateMode.Modified);
+                    await db!.runAsync(
+                        `INSERT OR REPLACE INTO resources (
+                            id, title, description, imageUrl, thumbnailUrl,
+                            link, type, userId, cachedAt, updatedAtTs,
+                            isBookmarked, createdAt, updatedAt
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        [
+                            r.id,
+                            r.title || 'Untitled',
+                            r.description || null,
+                            r.imageUrl || r.thumbnail || null,
+                            r.thumbnailUrl || r.thumbnail || null,
+                            r.link || null,
+                            r.type || null,
+                            r.userId || null,
+                            now,
+                            updatedAtTs,
+                            r.isBookmarked ? 1 : 0,
+                            r.createdAt || (r.created_at?.toISOString ? r.created_at.toISOString() : null),
+                            r.updatedAt || (r.updated_at?.toISOString ? r.updated_at.toISOString() : null)
+                        ]
+                    );
                 }
                 // Update sync metadata
-                realmInstance!.create(SyncMetadata, {
-                    collection: 'grammar_images',
-                    lastSync: now,
-                    itemCount: resources.length
-                }, Realm.UpdateMode.Modified);
+                await db!.runAsync(
+                    'INSERT OR REPLACE INTO sync_metadata (collection, lastSync, itemCount) VALUES (?, ?, ?)',
+                    ['grammar_images', now, resources.length]
+                );
             });
 
-            console.log(`✅ Realm: Cached ${resources.length} grammar images`);
+            console.log(`✅ SQLite: Cached ${resources.length} resources.`);
         } catch (error) {
-            console.error('❌ Error caching grammar images in Realm:', error);
+            console.error('❌ Error caching resources in SQLite:', error);
             throw error;
         }
     });
 };
 
 export const getCachedResources = async (options?: { search?: string; onlyBookmarks?: boolean }): Promise<{ data: ResourceType[], isStale: boolean }> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return { data: [], isStale: true };
+    if (!db) await initDatabase();
+    if (!db) return { data: [], isStale: true };
 
     try {
-        const metadata = realmInstance.objectForPrimaryKey(SyncMetadata, 'grammar_images');
+        const metadata: any = await db.getFirstAsync('SELECT * FROM sync_metadata WHERE collection = ?', ['grammar_images']);
         const isStale = !metadata || (Date.now() - metadata.lastSync > CACHE_EXPIRY_MS);
 
-        let results = realmInstance.objects(Resource);
+        let queryStr = 'SELECT * FROM resources';
+        let params: any[] = [];
+        let conditions: string[] = [];
 
         if (options?.onlyBookmarks) {
-            results = results.filtered('isBookmarked == true');
+            conditions.push('isBookmarked = 1');
         }
 
         if (options?.search) {
-            const searchTerm = options.search.trim().toLowerCase();
-            results = results.filtered('title CONTAINS[c] $0 OR description CONTAINS[c] $0', searchTerm);
-            console.log(`🔍 Realm: Searching resources for: "${searchTerm}"`);
+            conditions.push('(title LIKE ? OR description LIKE ?)');
+            const searchPattern = `%${options.search.trim().toLowerCase()}%`;
+            params.push(searchPattern, searchPattern);
+        }
+
+        if (conditions.length > 0) {
+            queryStr += ' WHERE ' + conditions.join(' AND ');
         }
 
         // Sorting
-        const sortedResults = options?.onlyBookmarks
-            ? results.sorted('updatedAtTs', true)
-            : results.sorted([['updatedAtTs', true], ['id', true]]);
+        if (options?.onlyBookmarks) {
+            queryStr += ' ORDER BY updatedAtTs DESC';
+        } else {
+            queryStr += ' ORDER BY updatedAtTs DESC, id ASC';
+        }
 
-        const data = sortedResults.map(r => JSON.parse(r.data) as ResourceType);
+        const rows: any[] = await db.getAllAsync(queryStr, params);
+
+        const data = rows.map(r => ({
+            id: r.id,
+            title: r.title,
+            description: r.description,
+            imageUrl: r.imageUrl,
+            thumbnailUrl: r.thumbnailUrl,
+            link: r.link,
+            type: r.type,
+            userId: r.userId,
+            createdAt: r.createdAt,
+            updatedAt: r.updatedAt,
+            isBookmarked: r.isBookmarked === 1
+        } as ResourceType));
 
         return { data, isStale };
     } catch (error) {
-        console.error('❌ Error getting cached grammar images from Realm:', error);
+        console.error('❌ Error getting cached resources from SQLite:', error);
         return { data: [], isStale: true };
     }
 };
 
-export const getVocabularyByIdFromCache = async (id: string): Promise<VocabularyType | null> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return null;
-
-    try {
-        const vocab = realmInstance.objectForPrimaryKey(Vocabulary, id);
-        return vocab ? JSON.parse(vocab.data) : null;
-    } catch (error) {
-        console.error('❌ Error getting vocabulary from Realm:', error);
-        return null;
-    }
-};
-
 export const getResourceByIdFromCache = async (id: string): Promise<ResourceType | null> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return null;
+    if (!db) await initDatabase();
+    if (!db) return null;
 
     try {
-        const resource = realmInstance.objectForPrimaryKey(Resource, id);
-        return resource ? JSON.parse(resource.data) : null;
+        const r: any = await db.getFirstAsync('SELECT * FROM resources WHERE id = ?', [id]);
+        if (!r) return null;
+
+        return {
+            id: r.id,
+            title: r.title,
+            description: r.description,
+            imageUrl: r.imageUrl,
+            thumbnailUrl: r.thumbnailUrl,
+            link: r.link,
+            type: r.type,
+            userId: r.userId,
+            createdAt: r.createdAt,
+            updatedAt: r.updatedAt,
+            isBookmarked: r.isBookmarked === 1
+        } as ResourceType;
     } catch (error) {
-        console.error('❌ Error getting resource from Realm:', error);
+        console.error('❌ Error getting resource from SQLite:', error);
         return null;
     }
-};
-
-// Redundant functions removed - use cacheResources / getCachedResources instead
-
-// ===== SEARCH CACHE =====
-
-export const cacheSearchResult = async (query: string, result: any) => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return;
-
-    return queueWrite(async () => {
-        try {
-            realmInstance!.write(() => {
-                realmInstance!.create('SearchCache', {
-                    query,
-                    result: JSON.stringify(result),
-                    updatedAt: Date.now()
-                }, Realm.UpdateMode.Modified);
-            });
-        } catch (error) {
-            console.error('Error caching search result in Realm:', error);
-        }
-    });
 };
 
 // ===== SYNC METADATA =====
 
 export const getCollectionMetadata = async (collection: string) => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return null;
+    if (!db) await initDatabase();
+    if (!db) return null;
 
     try {
-        const metadata = realmInstance.objectForPrimaryKey(SyncMetadata, collection);
+        const metadata: any = await db.getFirstAsync('SELECT * FROM sync_metadata WHERE collection = ?', [collection]);
         return metadata ? { lastSync: metadata.lastSync, itemCount: metadata.itemCount } : null;
     } catch (error) {
-        console.error(`❌ Error getting ${collection} metadata from Realm:`, error);
+        console.error(`❌ Error getting ${collection} metadata from SQLite:`, error);
         return null;
     }
 };
 
 export const updateLastSyncMetadata = async (collection: string, itemCount: number) => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return;
+    if (!db) await initDatabase();
+    if (!db) return;
 
     return queueWrite(async () => {
         try {
-            realmInstance!.write(() => {
-                realmInstance!.create('SyncMetadata', {
-                    collection,
-                    lastSync: Date.now(),
-                    itemCount
-                }, Realm.UpdateMode.Modified);
-            });
+            await db!.runAsync(
+                'INSERT OR REPLACE INTO sync_metadata (collection, lastSync, itemCount) VALUES (?, ?, ?)',
+                [collection, Date.now(), itemCount]
+            );
         } catch (error) {
-            console.error(`❌ Error updating ${collection} metadata in Realm:`, error);
+            console.error(`❌ Error updating ${collection} metadata in SQLite:`, error);
         }
     });
 };
 
-export const getLatestUpdatedTimestamp = async (collectionName: string): Promise<string | null> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return null;
+// ===== TIMESTAMPS =====
+
+export const getLatestUpdatedTimestamp = async (collection: string): Promise<number> => {
+    if (!db) await initDatabase();
+    if (!db) return 0;
 
     try {
-        const latest = collectionName === 'vocabularies'
-            ? realmInstance.objects(Vocabulary).sorted('updatedAtTs', true)[0]
-            : realmInstance.objects(Resource).sorted('updatedAtTs', true)[0];
-
-        if (!latest) return null;
-        return new Date(latest.updatedAtTs).toISOString();
+        const table = collection === 'grammar_images' ? 'resources' : 'vocabularies';
+        const row: any = await db.getFirstAsync(`SELECT MAX(updatedAtTs) as maxTs FROM ${table}`);
+        return row?.maxTs || 0;
     } catch (error) {
-        console.error('❌ Error getting latest updated timestamp from Realm:', error);
-        return null;
+        console.error(`❌ Error getting latest timestamp for ${collection} from SQLite:`, error);
+        return 0;
     }
 };
 
-export const getOldestUpdatedTimestamp = async (collectionName: string): Promise<string | null> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return null;
+export const getOldestUpdatedTimestamp = async (collection: string): Promise<number> => {
+    if (!db) await initDatabase();
+    if (!db) return 0;
 
     try {
-        const oldest = collectionName === 'vocabularies'
-            ? realmInstance.objects(Vocabulary).sorted('updatedAtTs', false)[0]
-            : realmInstance.objects(Resource).sorted('updatedAtTs', false)[0];
-
-        if (!oldest) return null;
-        return new Date(oldest.updatedAtTs).toISOString();
+        const table = collection === 'grammar_images' ? 'resources' : 'vocabularies';
+        const row: any = await db.getFirstAsync(`SELECT MIN(updatedAtTs) as minTs FROM ${table}`);
+        return row?.minTs || 0;
     } catch (error) {
-        console.error('❌ Error getting oldest updated timestamp from Realm:', error);
-        return null;
+        console.error(`❌ Error getting oldest timestamp for ${collection} from SQLite:`, error);
+        return 0;
     }
 };
 
-export const isCacheEmpty = async (collectionName: string): Promise<boolean> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return true;
+export const isCacheEmpty = async (collection: string): Promise<boolean> => {
+    if (!db) await initDatabase();
+    if (!db) return true;
 
     try {
-        const count = collectionName === 'vocabularies'
-            ? realmInstance.objects(Vocabulary).length
-            : realmInstance.objects(Resource).length;
-        return count === 0;
+        const table = collection === 'grammar_images' ? 'resources' : 'vocabularies';
+        const row: any = await db.getFirstAsync(`SELECT COUNT(*) as count FROM ${table}`);
+        return (row?.count || 0) === 0;
     } catch (error) {
-        console.error(`❌ Error checking if ${collectionName} cache is empty in Realm:`, error);
+        console.error(`❌ Error checking if ${collection} cache is empty in SQLite:`, error);
         return true;
     }
 };
 
-export const getCachedSearchResult = async (query: string) => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return null;
 
-    try {
-        const result = realmInstance.objectForPrimaryKey(SearchCache, query);
-        return result ? JSON.parse(result.result) : null;
-    } catch (error) {
-        console.error('Error getting cached search result from Realm:', error);
-        return null;
-    }
-};
-
-// ===== FAVORITES / BOOKMARKS =====
-
-export const addFavoriteVocab = async (vocabId: string) => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return;
-
-    return queueWrite(async () => {
-        const vocab = realmInstance!.objectForPrimaryKey(Vocabulary, vocabId);
-        if (vocab) {
-            realmInstance!.write(() => {
-                vocab.isFavorite = true;
-                vocab.updatedAtTs = Date.now(); // Mark as updated for sorting
-            });
-        }
-    });
-};
-
-export const removeFavoriteVocab = async (vocabId: string) => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return;
-
-    return queueWrite(async () => {
-        const vocab = realmInstance!.objectForPrimaryKey(Vocabulary, vocabId);
-        if (vocab) {
-            realmInstance!.write(() => {
-                vocab.isFavorite = false;
-            });
-        }
-    });
-};
-
-export const isVocabFavorited = async (vocabId: string): Promise<boolean> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return false;
-
-    const vocab = realmInstance.objectForPrimaryKey(Vocabulary, vocabId);
-    return vocab?.isFavorite || false;
-};
-
-export const getFavoriteVocabIds = async (): Promise<string[]> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return [];
-
-    const favs = realmInstance.objects(Vocabulary).filtered('isFavorite == true');
-    return favs.map(v => v.id);
-};
-
-export const addBookmarkResource = async (resourceId: string) => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return;
-
-    return queueWrite(async () => {
-        const resource = realmInstance!.objectForPrimaryKey(Resource, resourceId);
-        if (resource) {
-            realmInstance!.write(() => {
-                resource.isBookmarked = true;
-                resource.updatedAtTs = Date.now();
-            });
-        }
-    });
-};
-
-export const removeBookmarkResource = async (resourceId: string) => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return;
-
-    return queueWrite(async () => {
-        const resource = realmInstance!.objectForPrimaryKey(Resource, resourceId);
-        if (resource) {
-            realmInstance!.write(() => {
-                resource.isBookmarked = false;
-            });
-        }
-    });
-};
-
-export const isResourceBookmarked = async (resourceId: string): Promise<boolean> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return false;
-
-    const resource = realmInstance.objectForPrimaryKey(Resource, resourceId);
-    return resource?.isBookmarked || false;
-};
-
-export const getBookmarkResourceIds = async (): Promise<string[]> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return [];
-
-    const bookmarks = realmInstance.objects(Resource).filtered('isBookmarked == true');
-    return bookmarks.map(r => r.id);
-};
-
-
-// ===== LEARNING / FLASHCARD PROGRESS (SRS) =====
-
-export const getVocabulariesForSession = async (limit: number = 50, mode: 'mixed' | 'new' | 'review' | 'hardest' = 'mixed'): Promise<VocabularyType[]> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return [];
-
-    try {
-        const now = Date.now();
-        let results: Realm.Results<Vocabulary>;
-
-        if (mode === 'review') {
-            const progressIds = realmInstance.objects(LearningProgress)
-                .filtered('nextReview <= $0', now)
-                .sorted('nextReview', false)
-                .slice(0, limit)
-                .map(p => p.vocabularyId);
-
-            results = realmInstance.objects(Vocabulary).filtered('id IN $0', progressIds);
-        } else if (mode === 'new') {
-            const progressIds = realmInstance.objects(LearningProgress).map(p => p.vocabularyId);
-            results = realmInstance.objects(Vocabulary).filtered('NOT (id IN $0 OR partOfSpeech == null)', progressIds);
-            // Randomization is tricky in Realm, so we'll just slice. 
-            // In a real app we might use a random seed or index.
-        } else if (mode === 'hardest') {
-            const progressIds = realmInstance.objects(LearningProgress)
-                .filtered('isDifficult == true OR easeFactor < 2.0')
-                .sorted('easeFactor', false)
-                .slice(0, limit)
-                .map(p => p.vocabularyId);
-
-            results = realmInstance.objects(Vocabulary).filtered('id IN $0', progressIds);
-        } else {
-            // Mixed
-            const dueIds = realmInstance.objects(LearningProgress)
-                .filtered('nextReview <= $0', now)
-                .sorted('nextReview', false)
-                .slice(0, Math.floor(limit / 2))
-                .map(p => p.vocabularyId);
-
-            const progressIds = realmInstance.objects(LearningProgress).map(p => p.vocabularyId);
-            const newVocabs = realmInstance.objects(Vocabulary)
-                .filtered('NOT (id IN $0 OR partOfSpeech == null)', progressIds)
-                .slice(0, limit - dueIds.length);
-
-            const allIds = [...dueIds, ...newVocabs.map(v => v.id)];
-            results = realmInstance.objects(Vocabulary).filtered('id IN $0', allIds);
-        }
-
-        return results.slice(0, limit).map(v => JSON.parse(v.data) as VocabularyType);
-    } catch (error) {
-        console.error('❌ Error getting flashcards from Realm:', error);
-        return [];
-    }
-};
-
-export const processFlashcardAction = async (
-    vocabId: string,
-    action: 'know' | 'forget'
-) => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return;
-
-    const quality = action === 'know' ? 4 : 0;
+export const updateVocabularyProgress = async (vocabId: string, quality: number) => {
+    if (!db) await initDatabase();
+    if (!db) return;
 
     return queueWrite(async () => {
         try {
             const now = Date.now();
+            let progress: any = await db!.getFirstAsync('SELECT * FROM learning_progress WHERE vocabularyId = ?', [vocabId]);
 
-            realmInstance!.write(() => {
-                // 1. Record History
-                realmInstance!.create('FlashcardActivity', {
-                    id: Date.now(), // Simplified auto-increment
-                    vocabularyId: vocabId,
-                    action: action,
-                    timestamp: now
-                });
+            if (!progress) {
+                progress = {
+                    status: 'new',
+                    nextReview: 0,
+                    interval: 0,
+                    easeFactor: 2.5,
+                    repetitions: 0,
+                    lastReviewed: 0,
+                    isDifficult: 0
+                };
+            }
 
-                // 2. Process SRS Logic
-                let progress = realmInstance!.objectForPrimaryKey(LearningProgress, vocabId);
+            let { interval, repetitions, easeFactor } = progress;
 
-                if (!progress) {
-                    progress = realmInstance!.create(LearningProgress, {
-                        vocabularyId: vocabId,
-                        status: 'new',
-                        nextReview: 0,
-                        interval: 0,
-                        easeFactor: 2.5,
-                        repetitions: 0,
-                        lastReviewed: 0,
-                        isDifficult: false
-                    });
-                }
+            if (quality >= 3) {
+                if (repetitions === 0) interval = 1;
+                else if (repetitions === 1) interval = 6;
+                else interval = Math.round(interval * easeFactor);
+                repetitions += 1;
+            } else {
+                repetitions = 0;
+                interval = 1;
+            }
 
-                let { interval, repetitions, easeFactor } = progress;
+            easeFactor = easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
+            if (easeFactor < 1.3) easeFactor = 1.3;
 
-                if (quality >= 3) {
-                    if (repetitions === 0) {
-                        interval = 1;
-                    } else if (repetitions === 1) {
-                        interval = 6;
-                    } else {
-                        interval = Math.round(interval * easeFactor);
-                    }
-                    repetitions += 1;
-                } else {
-                    repetitions = 0;
-                    interval = 1;
-                }
+            const nextReview = now + (interval * 24 * 60 * 60 * 1000);
+            const status = interval > 21 ? 'mastered' : (repetitions > 0 ? 'review' : 'learning');
+            const isDifficult = easeFactor < 2.0 ? 1 : 0;
 
-                easeFactor = easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
-                if (easeFactor < 1.3) easeFactor = 1.3;
-
-                const nextReview = now + (interval * 24 * 60 * 60 * 1000);
-                const status = interval > 21 ? 'mastered' : (repetitions > 0 ? 'review' : 'learning');
-                const isDifficult = easeFactor < 2.0;
-
-                progress.status = status;
-                progress.nextReview = nextReview;
-                progress.interval = interval;
-                progress.easeFactor = easeFactor;
-                progress.repetitions = repetitions;
-                progress.lastReviewed = now;
-                progress.isDifficult = isDifficult;
-            });
+            await db!.runAsync(
+                `INSERT OR REPLACE INTO learning_progress (
+                    vocabularyId, status, nextReview, interval, easeFactor, 
+                    repetitions, lastReviewed, isDifficult
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                [vocabId, status, nextReview, interval, easeFactor, repetitions, now, isDifficult]
+            );
         } catch (error) {
-            console.error('❌ Error processing flashcard action in Realm:', error);
-            throw error;
-        }
-    });
-};
-
-export const updateVocabularyProgress = async (
-    vocabId: string,
-    quality: number // 0-5 (0=wrong, 3-5=correct/easy)
-) => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return;
-
-    return queueWrite(async () => {
-        try {
-            const now = Date.now();
-            realmInstance!.write(() => {
-                let progress = realmInstance!.objectForPrimaryKey(LearningProgress, vocabId);
-
-                if (!progress) {
-                    progress = realmInstance!.create(LearningProgress, {
-                        vocabularyId: vocabId,
-                        status: 'new',
-                        nextReview: 0,
-                        interval: 0,
-                        easeFactor: 2.5,
-                        repetitions: 0,
-                        lastReviewed: 0,
-                        isDifficult: false
-                    });
-                }
-
-                let { interval, repetitions, easeFactor } = progress;
-
-                if (quality >= 3) {
-                    // Correct response
-                    if (repetitions === 0) {
-                        interval = 1; // 1 day
-                    } else if (repetitions === 1) {
-                        interval = 6; // 6 days
-                    } else {
-                        interval = Math.round(interval * easeFactor);
-                    }
-                    repetitions += 1;
-                } else {
-                    // Incorrect response
-                    repetitions = 0;
-                    interval = 1; // 1 day
-                }
-
-                // Update Ease Factor
-                // q = quality (0-5)
-                // EF' = EF + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
-                easeFactor = easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
-                if (easeFactor < 1.3) easeFactor = 1.3;
-
-                const nextReview = now + (interval * 24 * 60 * 60 * 1000);
-                const status = interval > 21 ? 'mastered' : (repetitions > 0 ? 'review' : 'learning');
-                const isDifficult = easeFactor < 2.0;
-
-                progress.status = status;
-                progress.nextReview = nextReview;
-                progress.interval = interval;
-                progress.easeFactor = easeFactor;
-                progress.repetitions = repetitions;
-                progress.lastReviewed = now;
-                progress.isDifficult = isDifficult;
-            });
-        } catch (error) {
-            console.error('❌ Error updating progress in Realm:', error);
+            console.error('❌ Error updating vocabulary progress in SQLite:', error);
         }
     });
 };
 
 export const getLearningStats = async () => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return { new: 0, learning: 0, review: 0, mastered: 0, difficult: 0 };
+    if (!db) await initDatabase();
+    if (!db) return { new: 0, learning: 0, review: 0, mastered: 0, difficult: 0 };
 
     try {
-        const progress = realmInstance.objects(LearningProgress);
-        const vocabCount = realmInstance.objects(Vocabulary).length;
-        const touchedCount = progress.length;
+        const progressCountRow: any = await db!.getFirstAsync('SELECT COUNT(*) as count FROM learning_progress');
+        const vocabCountRow: any = await db!.getFirstAsync('SELECT COUNT(*) as count FROM vocabularies');
 
+        const touchedCount = progressCountRow?.count || 0;
+        const vocabCount = vocabCountRow?.count || 0;
         const untouched = Math.max(0, vocabCount - touchedCount);
 
-        const newCount = progress.filtered('status == "new"').length + untouched;
-        const learningCount = progress.filtered('status == "learning"').length;
-        const reviewCount = progress.filtered('status == "review"').length;
-        const masteredCount = progress.filtered('status == "mastered"').length;
-        const difficultCount = progress.filtered('isDifficult == true').length;
+        const rows: any[] = await db!.getAllAsync('SELECT status, isDifficult, COUNT(*) as count FROM learning_progress GROUP BY status, isDifficult');
 
-        return {
-            new: newCount,
-            learning: learningCount,
-            review: reviewCount,
-            mastered: masteredCount,
-            difficult: difficultCount
-        };
+        let stats = { new: untouched, learning: 0, review: 0, mastered: 0, difficult: 0 };
+
+        for (const row of rows) {
+            if (row.status === 'new') stats.new += row.count;
+            else if (row.status === 'learning') stats.learning += row.count;
+            else if (row.status === 'review') stats.review += row.count;
+            else if (row.status === 'mastered') stats.mastered += row.count;
+
+            if (row.isDifficult === 1) stats.difficult += row.count;
+        }
+
+        return stats;
     } catch (error) {
-        console.error('❌ Error getting stats from Realm:', error);
+        console.error('❌ Error getting learning stats from SQLite:', error);
         return { new: 0, learning: 0, review: 0, mastered: 0, difficult: 0 };
     }
 };
 
-// ===== NOTIFICATION HELPERS =====
+// ===== FAVORITE / BOOKMARK HELPERS =====
 
-export const getDueCardsCount = async (): Promise<number> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return 0;
+export const addFavoriteVocab = async (vocabId: string) => {
+    if (!db) await initDatabase();
+    if (!db) return;
+
+    return queueWrite(async () => {
+        try {
+            await db!.runAsync('UPDATE vocabularies SET isFavorite = 1, updatedAtTs = ? WHERE id = ?', [Date.now(), vocabId]);
+        } catch (error) {
+            console.error('❌ Error adding favorite in SQLite:', error);
+        }
+    });
+};
+
+export const removeFavoriteVocab = async (vocabId: string) => {
+    if (!db) await initDatabase();
+    if (!db) return;
+
+    return queueWrite(async () => {
+        try {
+            await db!.runAsync('UPDATE vocabularies SET isFavorite = 0, updatedAtTs = ? WHERE id = ?', [Date.now(), vocabId]);
+        } catch (error) {
+            console.error('❌ Error removing favorite in SQLite:', error);
+        }
+    });
+};
+
+export const isVocabFavorited = async (vocabId: string): Promise<boolean> => {
+    if (!db) await initDatabase();
+    if (!db) return false;
+
+    try {
+        const row: any = await db!.getFirstAsync('SELECT isFavorite FROM vocabularies WHERE id = ?', [vocabId]);
+        return row?.isFavorite === 1;
+    } catch (error) {
+        return false;
+    }
+};
+
+export const getFavoriteVocabIds = async (): Promise<string[]> => {
+    if (!db) await initDatabase();
+    if (!db) return [];
+
+    try {
+        const rows: any[] = await db!.getAllAsync('SELECT id FROM vocabularies WHERE isFavorite = 1');
+        return rows.map(r => r.id);
+    } catch (error) {
+        return [];
+    }
+};
+
+export const addBookmarkResource = async (resourceId: string) => {
+    if (!db) await initDatabase();
+    if (!db) return;
+
+    return queueWrite(async () => {
+        try {
+            await db!.runAsync('UPDATE resources SET isBookmarked = 1, updatedAtTs = ? WHERE id = ?', [Date.now(), resourceId]);
+        } catch (error) {
+            console.error('❌ Error adding bookmark in SQLite:', error);
+        }
+    });
+};
+
+export const removeBookmarkResource = async (resourceId: string) => {
+    if (!db) await initDatabase();
+    if (!db) return;
+
+    return queueWrite(async () => {
+        try {
+            await db!.runAsync('UPDATE resources SET isBookmarked = 0, updatedAtTs = ? WHERE id = ?', [Date.now(), resourceId]);
+        } catch (error) {
+            console.error('❌ Error removing bookmark in SQLite:', error);
+        }
+    });
+};
+
+export const isResourceBookmarked = async (resourceId: string): Promise<boolean> => {
+    if (!db) await initDatabase();
+    if (!db) return false;
+
+    try {
+        const row: any = await db!.getFirstAsync('SELECT isBookmarked FROM resources WHERE id = ?', [resourceId]);
+        return row?.isBookmarked === 1;
+    } catch (error) {
+        return false;
+    }
+};
+
+export const getBookmarkResourceIds = async (): Promise<string[]> => {
+    if (!db) await initDatabase();
+    if (!db) return [];
+
+    try {
+        const rows: any[] = await db!.getAllAsync('SELECT id FROM resources WHERE isBookmarked = 1');
+        return rows.map(r => r.id);
+    } catch (error) {
+        return [];
+    }
+};
+
+// ===== SRS SESSION LOGIC =====
+
+export const getVocabulariesForSession = async (limit: number = 50, mode: 'mixed' | 'new' | 'review' | 'hardest' = 'mixed'): Promise<VocabularyType[]> => {
+    if (!db) await initDatabase();
+    if (!db) return [];
 
     try {
         const now = Date.now();
-        return realmInstance.objects(LearningProgress).filtered('nextReview <= $0', now).length;
+        let queryStr = 'SELECT v.* FROM vocabularies v';
+        let params: any[] = [];
+
+        if (mode === 'review') {
+            queryStr += ' INNER JOIN learning_progress p ON v.id = p.vocabularyId WHERE p.nextReview <= ? ORDER BY p.nextReview ASC';
+            params.push(now);
+        } else if (mode === 'new') {
+            queryStr += ' LEFT JOIN learning_progress p ON v.id = p.vocabularyId WHERE p.vocabularyId IS NULL ORDER BY RANDOM()';
+        } else if (mode === 'hardest') {
+            queryStr += ' INNER JOIN learning_progress p ON v.id = p.vocabularyId WHERE p.isDifficult = 1 OR p.easeFactor < 2.0 ORDER BY p.easeFactor ASC';
+        } else {
+            // Mixed: Some due cards, some new cards
+            const dueRows: any[] = await db!.getAllAsync(
+                'SELECT v.id FROM vocabularies v INNER JOIN learning_progress p ON v.id = p.vocabularyId WHERE p.nextReview <= ? ORDER BY p.nextReview ASC LIMIT ?',
+                [now, Math.floor(limit / 2)]
+            );
+            const dueIds = dueRows.map(r => r.id);
+
+            const newRows: any[] = await db!.getAllAsync(
+                'SELECT v.id FROM vocabularies v LEFT JOIN learning_progress p ON v.id = p.vocabularyId WHERE p.vocabularyId IS NULL ORDER BY RANDOM() LIMIT ?',
+                [limit - dueIds.length]
+            );
+            const newIds = newRows.map(r => r.id);
+
+            const allIds = [...dueIds, ...newIds];
+            if (allIds.length === 0) return [];
+
+            queryStr += ` WHERE v.id IN (${allIds.map(() => '?').join(',')})`;
+            params = allIds;
+        }
+
+        queryStr += ` LIMIT ${limit}`;
+        const rows: any[] = await db!.getAllAsync(queryStr, params);
+
+        return rows.map(v => ({
+            id: v.id,
+            english: v.english,
+            bangla: v.bangla,
+            partOfSpeech: v.partOfSpeech,
+            pronunciation: v.pronunciation,
+            examples: v.examples ? JSON.parse(v.examples) : [],
+            synonyms: v.synonyms ? JSON.parse(v.synonyms) : [],
+            antonyms: v.antonyms ? JSON.parse(v.antonyms) : [],
+            explanation: v.explanation,
+            meaning: v.meaning,
+            difficulty_level: v.difficulty_level,
+            origin: v.origin,
+            audioUrl: v.audioUrl,
+            verbForms: v.verbForms ? JSON.parse(v.verbForms) : undefined,
+            relatedWords: v.relatedWords ? JSON.parse(v.relatedWords) : [],
+            userId: v.userId,
+            createdAt: v.createdAt,
+            updatedAt: v.updatedAt,
+            isFavorite: v.isFavorite === 1
+        } as VocabularyType));
     } catch (error) {
-        console.error('❌ Error getting due cards count from Realm:', error);
+        console.error('❌ Error getting session vocabularies from SQLite:', error);
+        return [];
+    }
+};
+
+// ===== SEARCH CACHE =====
+
+export const cacheSearchResult = async (query: string, result: any) => {
+    if (!db) await initDatabase();
+    if (!db) return;
+
+    return queueWrite(async () => {
+        try {
+            await db!.runAsync(
+                'INSERT OR REPLACE INTO search_cache (query, result, updatedAt) VALUES (?, ?, ?)',
+                [query, JSON.stringify(result), Date.now()]
+            );
+        } catch (error) {
+            console.error('❌ Error caching search result in SQLite:', error);
+        }
+    });
+};
+
+export const getCachedSearchResult = async (query: string): Promise<any | null> => {
+    if (!db) await initDatabase();
+    if (!db) return null;
+
+    try {
+        const row: any = await db.getFirstAsync('SELECT * FROM search_cache WHERE query = ?', [query]);
+        if (!row) return null;
+
+        // Check if cache is expired
+        if (Date.now() - row.updatedAt > CACHE_EXPIRY_MS) {
+            return null;
+        }
+
+        return JSON.parse(row.result);
+    } catch (error) {
+        console.error('❌ Error getting cached search result from SQLite:', error);
+        return null;
+    }
+};
+
+// ===== ACTIVITY HELPERS =====
+
+export const getDueCardsCount = async (): Promise<number> => {
+    if (!db) await initDatabase();
+    if (!db) return 0;
+
+    try {
+        const now = Date.now();
+        const row: any = await db.getFirstAsync('SELECT COUNT(*) as count FROM learning_progress WHERE nextReview <= ?', [now]);
+        return row?.count || 0;
+    } catch (error) {
+        console.error('❌ Error getting due cards count from SQLite:', error);
         return 0;
     }
 };
 
 export const getNewVocabCount = async (): Promise<number> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return 0;
+    if (!db) await initDatabase();
+    if (!db) return 0;
 
     try {
-        const vocabCount = realmInstance.objects(Vocabulary).length;
-        const touchedCount = realmInstance.objects(LearningProgress).length;
+        const vocabCountRow: any = await db.getFirstAsync('SELECT COUNT(*) as count FROM vocabularies');
+        const touchedCountRow: any = await db.getFirstAsync('SELECT COUNT(*) as count FROM learning_progress');
+
+        const vocabCount = vocabCountRow?.count || 0;
+        const touchedCount = touchedCountRow?.count || 0;
+
         return Math.max(0, vocabCount - touchedCount);
     } catch (error) {
-        console.error('❌ Error getting new vocab count from Realm:', error);
+        console.error('❌ Error getting new vocab count from SQLite:', error);
         return 0;
     }
 };
 
-// Redundant recordFlashcardActivity removed - use processFlashcardAction
-
 export const getFlashcardActivityStats = async (): Promise<{ known: number; forgotten: number; total: number }> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return { known: 0, forgotten: 0, total: 0 };
+    if (!db) await initDatabase();
+    if (!db) return { known: 0, forgotten: 0, total: 0 };
 
     try {
-        const activities = realmInstance.objects(FlashcardActivity);
-        const uniqueVocabIds = Array.from(new Set(activities.map(a => a.vocabularyId)));
+        // Get the latest action for each unique vocabularyId
+        const rows: any[] = await db.getAllAsync(`
+            SELECT vocabularyId, action 
+            FROM flashcard_activity 
+            WHERE id IN (SELECT MAX(id) FROM flashcard_activity GROUP BY vocabularyId)
+        `);
 
         let known = 0;
         let forgotten = 0;
 
-        for (const id of uniqueVocabIds) {
-            const latest = activities.filtered('vocabularyId == $0', id).sorted('timestamp', true)[0];
-            if (latest?.action === 'know') known++;
-            else if (latest?.action === 'forget') forgotten++;
+        for (const row of rows) {
+            if (row.action === 'know') known++;
+            else if (row.action === 'forget') forgotten++;
         }
 
         return {
             known,
             forgotten,
-            total: uniqueVocabIds.length
+            total: rows.length
         };
     } catch (error) {
-        console.error('❌ Error getting flashcard activity stats from Realm:', error);
+        console.error('❌ Error getting flashcard activity stats from SQLite:', error);
         return { known: 0, forgotten: 0, total: 0 };
     }
 };
 
 export const getTodayActivityCount = async (): Promise<number> => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return 0;
+    if (!db) await initDatabase();
+    if (!db) return 0;
 
     try {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
         const todayStart = today.getTime();
 
-        return realmInstance.objects(FlashcardActivity).filtered('timestamp >= $0', todayStart).length;
+        const row: any = await db.getFirstAsync('SELECT COUNT(*) as count FROM flashcard_activity WHERE timestamp >= ?', [todayStart]);
+        return row?.count || 0;
     } catch (error) {
-        console.error('❌ Error getting today activity count from Realm:', error);
+        console.error('❌ Error getting today activity count from SQLite:', error);
         return 0;
     }
 };
@@ -809,38 +879,49 @@ export const getTodayActivityCount = async (): Promise<number> => {
 // ===== UTILITY =====
 
 export const clearAllCache = async () => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return;
+    if (!db) await initDatabase();
+    if (!db) return;
 
     return queueWrite(async () => {
         try {
-            realmInstance!.write(() => {
-                realmInstance!.delete(realmInstance!.objects(Vocabulary));
-                realmInstance!.delete(realmInstance!.objects(Resource));
-                realmInstance!.delete(realmInstance!.objects(SyncMetadata));
-                realmInstance!.delete(realmInstance!.objects(SearchCache));
-                realmInstance!.delete(realmInstance!.objects(LearningProgress));
-                realmInstance!.delete(realmInstance!.objects(FlashcardActivity));
+            await db!.withTransactionAsync(async () => {
+                await db!.runAsync('DELETE FROM vocabularies');
+                await db!.runAsync('DELETE FROM resources');
+                await db!.runAsync('DELETE FROM sync_metadata');
+                await db!.runAsync('DELETE FROM learning_progress');
+                await db!.runAsync('DELETE FROM flashcard_activity');
+                await db!.runAsync('DELETE FROM search_cache');
             });
-            console.log('✅ All Realm cache cleared');
+            console.log('✅ All SQLite cache cleared');
         } catch (error) {
-            console.error('❌ Error clearing Realm cache:', error);
+            console.error('❌ Error clearing SQLite cache:', error);
         }
     });
 };
 
 export const getCacheStats = async () => {
-    if (!realmInstance) await initDatabase();
-    if (!realmInstance) return null;
+    if (!db) await initDatabase();
+    if (!db) return null;
 
     try {
-        return realmInstance.objects(SyncMetadata).map(m => ({
+        const rows: any[] = await db!.getAllAsync('SELECT * FROM sync_metadata');
+        return rows.map(m => ({
             collection: m.collection,
             last_sync: m.lastSync,
             item_count: m.itemCount
         }));
     } catch (error) {
-        console.error('❌ Error getting cache stats from Realm:', error);
+        console.error('❌ Error getting cache stats from SQLite:', error);
         return null;
     }
+};
+
+export const resetLocalCache = async () => {
+    await clearAllCache();
+    await AsyncStorage.removeItem('last_sync_timestamp');
+};
+
+// Backward compatibility or direct Firestore migration helper if needed
+export const migrateFromFirestore = async (vocabularies: VocabularyType[]) => {
+    return cacheVocabularies(vocabularies);
 };
