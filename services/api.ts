@@ -22,7 +22,7 @@ import {
     getResourceByIdFromCache,
     getVocabulariesForSession,
     getVocabularyByIdFromCache,
-    updateVocabularyProgress
+    processFlashcardAction
 } from './offlineStorage';
 import { queryClient } from './queryClient';
 import * as Storage from './storage';
@@ -395,7 +395,9 @@ export const getFlashcards = async (limit: number = 50, mode: 'mixed' | 'new' | 
 };
 
 export const updateFlashcardProgress = async (vocabId: string, quality: number) => {
-    return updateVocabularyProgress(vocabId, quality);
+    // quality range is 0-5 in SM-2. If quality >= 3, treat as "know", else "forget"
+    const action = quality >= 3 ? 'know' : 'forget';
+    return processFlashcardAction(vocabId, action);
 };
 
 export const getFlashcardStats = async () => {

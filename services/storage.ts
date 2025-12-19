@@ -98,9 +98,7 @@ export const migrateSecureStoreData = async () => {
         if (oldFavsJson) {
             const ids: string[] = JSON.parse(oldFavsJson);
             console.log(`🚚 Migrating ${ids.length} favorites to SQLite...`);
-            for (const id of ids) {
-                await OfflineStorage.addFavoriteVocab(id);
-            }
+            await OfflineStorage.addFavoriteVocabs(ids);
             // Clear old key
             await SecureStore.deleteItemAsync(FAVORITES_KEY);
             // Also clear large data key if it exists
@@ -112,9 +110,7 @@ export const migrateSecureStoreData = async () => {
         if (oldBookmarksJson) {
             const ids: string[] = JSON.parse(oldBookmarksJson);
             console.log(`🚚 Migrating ${ids.length} bookmarks to SQLite...`);
-            for (const id of ids) {
-                await OfflineStorage.addBookmarkResource(id);
-            }
+            await OfflineStorage.addBookmarkResources(ids);
             // Clear old key
             await SecureStore.deleteItemAsync(BOOKMARKS_KEY);
             // Also clear large data key if it exists

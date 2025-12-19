@@ -26,7 +26,7 @@ export default function AnalyticsScreen() {
 
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
-    const [stats, setStats] = useState({ new: 0, learning: 0, review: 0, mastered: 0, difficult: 0 });
+    const [stats, setStats] = useState({ new: 0, learning: 0, review: 0, mastered: 0, difficult: 0, todayCount: 0, totalActivity: 0 });
     const [totalVocabs, setTotalVocabs] = useState(0);
     const [streak, setStreak] = useState(0);
 
@@ -140,10 +140,22 @@ export default function AnalyticsScreen() {
                             <Text style={[styles.activityLabel, { color: '#E65100' }]}>Learning / Practice</Text>
                         </View>
 
-                        <View style={[styles.activityCard, { backgroundColor: '#E3F2FD', borderColor: '#2196F3', width: width - 40 }]}>
-                            <Ionicons name="sparkles" size={32} color="#2196F3" />
-                            <Text style={[styles.activityNumber, { color: '#1565C0' }]}>{wordsNotStarted}</Text>
-                            <Text style={[styles.activityLabel, { color: '#1565C0' }]}>Not Started Yet (Total: {totalVocabs})</Text>
+                        <View style={[styles.activityCard, { backgroundColor: '#F3E5F5', borderColor: '#9C27B0' }]}>
+                            <Ionicons name="today" size={32} color="#9C27B0" />
+                            <Text style={[styles.activityNumber, { color: '#7B1FA2' }]}>{stats.todayCount}</Text>
+                            <Text style={[styles.activityLabel, { color: '#7B1FA2' }]}>Cards Today</Text>
+                        </View>
+
+                        <View style={[styles.activityCard, { backgroundColor: '#E3F2FD', borderColor: '#2196F3' }]}>
+                            <Ionicons name="stats-chart" size={32} color="#2196F3" />
+                            <Text style={[styles.activityNumber, { color: '#1565C0' }]}>{stats.totalActivity}</Text>
+                            <Text style={[styles.activityLabel, { color: '#1565C0' }]}>Total Flips</Text>
+                        </View>
+
+                        <View style={[styles.activityCard, { backgroundColor: '#F1F8E9', borderColor: '#8BC34A', width: width - 40 }]}>
+                            <Ionicons name="sparkles" size={32} color="#8BC34A" />
+                            <Text style={[styles.activityNumber, { color: '#558B2F' }]}>{wordsNotStarted}</Text>
+                            <Text style={[styles.activityLabel, { color: '#558B2F' }]}>Not Started Yet (Total: {totalVocabs})</Text>
                         </View>
                     </View>
                 </View>

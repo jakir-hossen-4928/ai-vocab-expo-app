@@ -13,89 +13,102 @@ export const initDatabase = async () => {
 
     initPromise = (async () => {
         try {
-            db = await SQLite.openDatabaseAsync('vocab.db');
+            // Open the database with a local variable first to avoid premature sharing
+            const _db = await SQLite.openDatabaseAsync('vocab.db');
 
-            // 1. Create Tables
-            await db.execAsync(`
-                CREATE TABLE IF NOT EXISTS vocabularies (
-                    id TEXT PRIMARY KEY,
-                    english TEXT NOT NULL,
-                    bangla TEXT NOT NULL,
-                    partOfSpeech TEXT,
-                    pronunciation TEXT,
-                    examples TEXT, -- JSON string
-                    synonyms TEXT, -- JSON string
-                    antonyms TEXT, -- JSON string
-                    explanation TEXT,
-                    meaning TEXT,
-                    difficulty_level TEXT,
-                    origin TEXT,
-                    audioUrl TEXT,
-                    verbForms TEXT, -- JSON string
-                    relatedWords TEXT, -- JSON string
-                    userId TEXT,
-                    cachedAt INTEGER,
-                    updatedAtTs INTEGER,
-                    isFavorite INTEGER DEFAULT 0,
-                    createdAt TEXT,
-                    updatedAt TEXT
-                );
-                
-                CREATE TABLE IF NOT EXISTS resources (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    description TEXT,
-                    imageUrl TEXT,
-                    thumbnailUrl TEXT,
-                    link TEXT,
-                    type TEXT,
-                    userId TEXT,
-                    cachedAt INTEGER,
-                    updatedAtTs INTEGER,
-                    isBookmarked INTEGER DEFAULT 0,
-                    createdAt TEXT,
-                    updatedAt TEXT
-                );
+            // 0. Enable WAL Mode and optimize IMMEDIATELY
+            // WAL allows simultaneous reads and writes
+            await _db.execAsync('PRAGMA journal_mode = WAL;');
+            await _db.execAsync('PRAGMA synchronous = NORMAL;');
+            await _db.execAsync('PRAGMA busy_timeout = 5000;');
 
-                CREATE TABLE IF NOT EXISTS sync_metadata (
-                    collection TEXT PRIMARY KEY,
-                    lastSync INTEGER,
-                    itemCount INTEGER
-                );
+            // 1. Create Tables in a single transaction
+            await _db.withTransactionAsync(async () => {
+                await _db.execAsync(`
+                    CREATE TABLE IF NOT EXISTS vocabularies (
+                        id TEXT PRIMARY KEY,
+                        english TEXT NOT NULL,
+                        bangla TEXT NOT NULL,
+                        partOfSpeech TEXT,
+                        pronunciation TEXT,
+                        examples TEXT, -- JSON string
+                        synonyms TEXT, -- JSON string
+                        antonyms TEXT, -- JSON string
+                        explanation TEXT,
+                        meaning TEXT,
+                        difficulty_level TEXT,
+                        origin TEXT,
+                        audioUrl TEXT,
+                        verbForms TEXT, -- JSON string
+                        relatedWords TEXT, -- JSON string
+                        userId TEXT,
+                        cachedAt INTEGER,
+                        updatedAtTs INTEGER,
+                        isFavorite INTEGER DEFAULT 0,
+                        createdAt TEXT,
+                        updatedAt TEXT
+                    );
+                    
+                    CREATE TABLE IF NOT EXISTS resources (
+                        id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        description TEXT,
+                        imageUrl TEXT,
+                        thumbnailUrl TEXT,
+                        link TEXT,
+                        type TEXT,
+                        userId TEXT,
+                        cachedAt INTEGER,
+                        updatedAtTs INTEGER,
+                        isBookmarked INTEGER DEFAULT 0,
+                        createdAt TEXT,
+                        updatedAt TEXT
+                    );
 
-                CREATE TABLE IF NOT EXISTS learning_progress (
-                    vocabularyId TEXT PRIMARY KEY,
-                    status TEXT DEFAULT 'new',
-                    nextReview INTEGER DEFAULT 0,
-                    interval INTEGER DEFAULT 0,
-                    easeFactor REAL DEFAULT 2.5,
-                    repetitions INTEGER DEFAULT 0,
-                    lastReviewed INTEGER DEFAULT 0,
-                    isDifficult INTEGER DEFAULT 0
-                );
+                    CREATE TABLE IF NOT EXISTS sync_metadata (
+                        collection TEXT PRIMARY KEY,
+                        lastSync INTEGER,
+                        itemCount INTEGER
+                    );
 
-                CREATE TABLE IF NOT EXISTS flashcard_activity (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    vocabularyId TEXT,
-                    action TEXT,
-                    timestamp INTEGER
-                );
+                    CREATE TABLE IF NOT EXISTS learning_progress (
+                        vocabularyId TEXT PRIMARY KEY,
+                        status TEXT DEFAULT 'new',
+                        nextReview INTEGER DEFAULT 0,
+                        interval INTEGER DEFAULT 0,
+                        easeFactor REAL DEFAULT 2.5,
+                        repetitions INTEGER DEFAULT 0,
+                        lastReviewed INTEGER DEFAULT 0,
+                        isDifficult INTEGER DEFAULT 0
+                    );
 
-                CREATE TABLE IF NOT EXISTS search_cache (
-                    query TEXT PRIMARY KEY,
-                    result TEXT, -- JSON string
-                    updatedAt INTEGER
-                );
+                    CREATE TABLE IF NOT EXISTS flashcard_activity (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        vocabularyId TEXT,
+                        action TEXT,
+                        timestamp INTEGER
+                    );
 
-                -- Indexes for performance
-                CREATE INDEX IF NOT EXISTS idx_vocab_english ON vocabularies(english);
-                CREATE INDEX IF NOT EXISTS idx_vocab_pos ON vocabularies(partOfSpeech);
-                CREATE INDEX IF NOT EXISTS idx_vocab_updated ON vocabularies(updatedAtTs);
-                CREATE INDEX IF NOT EXISTS idx_resource_updated ON resources(updatedAtTs);
-                CREATE INDEX IF NOT EXISTS idx_progress_next ON learning_progress(nextReview);
-            `);
+                    CREATE TABLE IF NOT EXISTS search_cache (
+                        query TEXT PRIMARY KEY,
+                        result TEXT, -- JSON string
+                        updatedAt INTEGER
+                    );
+                `);
 
-            console.log('✅ SQLite Database initialized with full field support');
+                // Indexes
+                await _db.execAsync(`
+                    CREATE INDEX IF NOT EXISTS idx_vocab_english ON vocabularies(english);
+                    CREATE INDEX IF NOT EXISTS idx_vocab_pos ON vocabularies(partOfSpeech);
+                    CREATE INDEX IF NOT EXISTS idx_vocab_updated ON vocabularies(updatedAtTs);
+                    CREATE INDEX IF NOT EXISTS idx_resource_updated ON resources(updatedAtTs);
+                    CREATE INDEX IF NOT EXISTS idx_progress_next ON learning_progress(nextReview);
+                `);
+            });
+
+            // Only set the global shared DB instance AFTER everything is 100% ready
+            db = _db;
+            console.log('✅ SQLite Database fully initialized and ready (WAL mode)');
         } catch (error) {
             console.error('❌ Error initializing SQLite database:', error);
             initPromise = null;
@@ -106,22 +119,44 @@ export const initDatabase = async () => {
     return initPromise;
 };
 
-// Queue for database write operations
-let writeQueue: Promise<any> = Promise.resolve();
+// Queue for database write operations - ensures single-threaded write access
+// Even with WAL mode, only one process should write at a time for maximum safety.
+type QueueTask = () => Promise<any>;
+const writeQueue: QueueTask[] = [];
+let isProcessingQueue = false;
 
-const queueWrite = async <T>(operation: () => Promise<T>): Promise<T> => {
-    const currentQueue = writeQueue;
-    const nextTask = (async () => {
-        try {
-            await currentQueue.catch(() => { });
-            return await operation();
-        } catch (error) {
-            throw error;
+const processQueue = async () => {
+    if (isProcessingQueue || writeQueue.length === 0) return;
+    isProcessingQueue = true;
+
+    while (writeQueue.length > 0) {
+        const task = writeQueue.shift();
+        if (task) {
+            try {
+                // Ensure the database is initialized before any task runs
+                if (!db) await initDatabase();
+                await task();
+            } catch (error) {
+                console.error('❌ SQLite Queue execution error:', error);
+            }
         }
-    })();
+    }
 
-    writeQueue = nextTask.catch(() => { });
-    return nextTask;
+    isProcessingQueue = false;
+};
+
+const queueWrite = <T>(operation: () => Promise<T>): Promise<T> => {
+    return new Promise((resolve, reject) => {
+        writeQueue.push(async () => {
+            try {
+                const result = await operation();
+                resolve(result);
+            } catch (error) {
+                reject(error);
+            }
+        });
+        processQueue().catch(e => console.error('Queue processing crash:', e));
+    });
 };
 
 // ===== VOCABULARIES =====
@@ -500,62 +535,82 @@ export const isCacheEmpty = async (collection: string): Promise<boolean> => {
 };
 
 
-export const updateVocabularyProgress = async (vocabId: string, quality: number) => {
+export const processFlashcardAction = async (vocabId: string, action: 'know' | 'forget') => {
     if (!db) await initDatabase();
     if (!db) return;
 
+    // Use queueWrite to prevent concurrent write attempts
     return queueWrite(async () => {
         try {
             const now = Date.now();
-            let progress: any = await db!.getFirstAsync('SELECT * FROM learning_progress WHERE vocabularyId = ?', [vocabId]);
+            // Use a transaction for atomicity and to reduce the number of lock acquisitions
+            await db!.withTransactionAsync(async () => {
+                // 1. Record activity
+                await db!.runAsync(
+                    'INSERT INTO flashcard_activity (vocabularyId, action, timestamp) VALUES (?, ?, ?)',
+                    [vocabId, action, now]
+                );
 
-            if (!progress) {
-                progress = {
-                    status: 'new',
-                    nextReview: 0,
-                    interval: 0,
-                    easeFactor: 2.5,
-                    repetitions: 0,
-                    lastReviewed: 0,
-                    isDifficult: 0
-                };
-            }
+                // 2. Update progress using SM-2 logic
+                const quality = action === 'know' ? 5 : 0;
 
-            let { interval, repetitions, easeFactor } = progress;
+                let progress: any = await db!.getFirstAsync('SELECT * FROM learning_progress WHERE vocabularyId = ?', [vocabId]);
 
-            if (quality >= 3) {
-                if (repetitions === 0) interval = 1;
-                else if (repetitions === 1) interval = 6;
-                else interval = Math.round(interval * easeFactor);
-                repetitions += 1;
-            } else {
-                repetitions = 0;
-                interval = 1;
-            }
+                if (!progress) {
+                    progress = {
+                        status: 'new',
+                        nextReview: 0,
+                        interval: 0,
+                        easeFactor: 2.5,
+                        repetitions: 0,
+                        lastReviewed: 0,
+                        isDifficult: 0
+                    };
+                }
 
-            easeFactor = easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
-            if (easeFactor < 1.3) easeFactor = 1.3;
+                let { interval, repetitions, easeFactor } = progress;
 
-            const nextReview = now + (interval * 24 * 60 * 60 * 1000);
-            const status = interval > 21 ? 'mastered' : (repetitions > 0 ? 'review' : 'learning');
-            const isDifficult = easeFactor < 2.0 ? 1 : 0;
+                if (quality >= 3) {
+                    if (repetitions === 0) interval = 1;
+                    else if (repetitions === 1) interval = 6;
+                    else interval = Math.round(interval * easeFactor);
+                    repetitions += 1;
+                } else {
+                    repetitions = 0;
+                    interval = 1;
+                }
 
-            await db!.runAsync(
-                `INSERT OR REPLACE INTO learning_progress (
-                    vocabularyId, status, nextReview, interval, easeFactor, 
-                    repetitions, lastReviewed, isDifficult
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                [vocabId, status, nextReview, interval, easeFactor, repetitions, now, isDifficult]
-            );
+                // Ease Factor formula
+                easeFactor = easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02));
+                if (easeFactor < 1.3) easeFactor = 1.3;
+
+                const nextReview = now + (interval * 24 * 60 * 60 * 1000);
+                const status = interval > 21 ? 'mastered' : (repetitions > 0 ? 'review' : 'learning');
+                const isDifficult = easeFactor < 2.0 ? 1 : 0;
+
+                await db!.runAsync(
+                    `INSERT OR REPLACE INTO learning_progress (
+                        vocabularyId, status, nextReview, interval, easeFactor, 
+                        repetitions, lastReviewed, isDifficult
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [vocabId, status, nextReview, interval, easeFactor, repetitions, now, isDifficult]
+                );
+            });
         } catch (error) {
-            console.error('❌ Error updating vocabulary progress in SQLite:', error);
+            console.error('❌ Error processing flashcard action in SQLite:', error);
+            throw error;
         }
     });
 };
 
+export const updateVocabularyProgress = async (vocabId: string, quality: number) => {
+    const action = quality >= 3 ? 'know' : 'forget';
+    return processFlashcardAction(vocabId, action);
+};
+
 export const getLearningStats = async () => {
     if (!db) await initDatabase();
-    if (!db) return { new: 0, learning: 0, review: 0, mastered: 0, difficult: 0 };
+    if (!db) return { new: 0, learning: 0, review: 0, mastered: 0, difficult: 0, todayCount: 0, totalActivity: 0 };
 
     try {
         const progressCountRow: any = await db!.getFirstAsync('SELECT COUNT(*) as count FROM learning_progress');
@@ -567,11 +622,27 @@ export const getLearningStats = async () => {
 
         const rows: any[] = await db!.getAllAsync('SELECT status, isDifficult, COUNT(*) as count FROM learning_progress GROUP BY status, isDifficult');
 
-        let stats = { new: untouched, learning: 0, review: 0, mastered: 0, difficult: 0 };
+        // Today's activity
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const todayStart = today.getTime();
+        const todayRow: any = await db!.getFirstAsync('SELECT COUNT(*) as count FROM flashcard_activity WHERE timestamp >= ?', [todayStart]);
+
+        // Total activity count
+        const totalActivityRow: any = await db!.getFirstAsync('SELECT COUNT(*) as count FROM flashcard_activity');
+
+        let stats = {
+            new: untouched,
+            learning: 0,
+            review: 0,
+            mastered: 0,
+            difficult: 0,
+            todayCount: todayRow?.count || 0,
+            totalActivity: totalActivityRow?.count || 0
+        };
 
         for (const row of rows) {
-            if (row.status === 'new') stats.new += row.count;
-            else if (row.status === 'learning') stats.learning += row.count;
+            if (row.status === 'learning') stats.learning += row.count;
             else if (row.status === 'review') stats.review += row.count;
             else if (row.status === 'mastered') stats.mastered += row.count;
 
@@ -581,21 +652,30 @@ export const getLearningStats = async () => {
         return stats;
     } catch (error) {
         console.error('❌ Error getting learning stats from SQLite:', error);
-        return { new: 0, learning: 0, review: 0, mastered: 0, difficult: 0 };
+        return { new: 0, learning: 0, review: 0, mastered: 0, difficult: 0, todayCount: 0, totalActivity: 0 };
     }
 };
 
 // ===== FAVORITE / BOOKMARK HELPERS =====
 
 export const addFavoriteVocab = async (vocabId: string) => {
+    return addFavoriteVocabs([vocabId]);
+};
+
+export const addFavoriteVocabs = async (vocabIds: string[]) => {
     if (!db) await initDatabase();
     if (!db) return;
 
     return queueWrite(async () => {
         try {
-            await db!.runAsync('UPDATE vocabularies SET isFavorite = 1, updatedAtTs = ? WHERE id = ?', [Date.now(), vocabId]);
+            const now = Date.now();
+            await db!.withTransactionAsync(async () => {
+                for (const vocabId of vocabIds) {
+                    await db!.runAsync('UPDATE vocabularies SET isFavorite = 1, updatedAtTs = ? WHERE id = ?', [now, vocabId]);
+                }
+            });
         } catch (error) {
-            console.error('❌ Error adding favorite in SQLite:', error);
+            console.error('❌ Error adding favorites in SQLite:', error);
         }
     });
 };
@@ -638,14 +718,23 @@ export const getFavoriteVocabIds = async (): Promise<string[]> => {
 };
 
 export const addBookmarkResource = async (resourceId: string) => {
+    return addBookmarkResources([resourceId]);
+};
+
+export const addBookmarkResources = async (resourceIds: string[]) => {
     if (!db) await initDatabase();
     if (!db) return;
 
     return queueWrite(async () => {
         try {
-            await db!.runAsync('UPDATE resources SET isBookmarked = 1, updatedAtTs = ? WHERE id = ?', [Date.now(), resourceId]);
+            const now = Date.now();
+            await db!.withTransactionAsync(async () => {
+                for (const resourceId of resourceIds) {
+                    await db!.runAsync('UPDATE resources SET isBookmarked = 1, updatedAtTs = ? WHERE id = ?', [now, resourceId]);
+                }
+            });
         } catch (error) {
-            console.error('❌ Error adding bookmark in SQLite:', error);
+            console.error('❌ Error adding bookmarks in SQLite:', error);
         }
     });
 };
