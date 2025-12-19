@@ -3,24 +3,34 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SQLite from 'expo-sqlite';
 
 let db: SQLite.SQLiteDatabase | null = null;
-let initPromise: Promise<void> | null = null;
 
 // Cache expiry: 30 minutes
 const CACHE_EXPIRY_MS = 1000 * 60 * 30;
 
-export const initDatabase = async () => {
-    if (initPromise) return initPromise;
+// Singleton promise for database initialization
+let dbInstance: SQLite.SQLiteDatabase | null = null;
+let initializationPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
-    initPromise = (async () => {
+/**
+ * Ensures the database is initialized and all PRAGMAs are set.
+ * Returns the ready database instance.
+ */
+export const getDatabase = async (): Promise<SQLite.SQLiteDatabase> => {
+    if (dbInstance) return dbInstance;
+    if (initializationPromise) return initializationPromise;
+
+    initializationPromise = (async () => {
         try {
-            // Open the database with a local variable first to avoid premature sharing
+            console.log('🏗️ Initializing SQLite Engine...');
             const _db = await SQLite.openDatabaseAsync('vocab.db');
 
-            // 0. Enable WAL Mode and optimize IMMEDIATELY
-            // WAL allows simultaneous reads and writes
-            await _db.execAsync('PRAGMA journal_mode = WAL;');
-            await _db.execAsync('PRAGMA synchronous = NORMAL;');
-            await _db.execAsync('PRAGMA busy_timeout = 5000;');
+            // CRITICAL: Set PRAGMAs IMMEDIATELY and ATOMICALLY
+            // This must happen before ANY table creation or selection
+            await _db.execAsync(`
+                PRAGMA journal_mode = WAL;
+                PRAGMA synchronous = NORMAL;
+                PRAGMA busy_timeout = 5000;
+            `);
 
             // 1. Create Tables in a single transaction
             await _db.withTransactionAsync(async () => {
@@ -31,44 +41,30 @@ export const initDatabase = async () => {
                         bangla TEXT NOT NULL,
                         partOfSpeech TEXT,
                         pronunciation TEXT,
-                        examples TEXT, -- JSON string
-                        synonyms TEXT, -- JSON string
-                        antonyms TEXT, -- JSON string
-                        explanation TEXT,
-                        meaning TEXT,
-                        difficulty_level TEXT,
-                        origin TEXT,
-                        audioUrl TEXT,
-                        verbForms TEXT, -- JSON string
-                        relatedWords TEXT, -- JSON string
-                        userId TEXT,
-                        cachedAt INTEGER,
-                        updatedAtTs INTEGER,
+                        examples TEXT, synonyms TEXT, antonyms TEXT,
+                        explanation TEXT, meaning TEXT,
+                        difficulty_level TEXT, origin TEXT,
+                        audioUrl TEXT, verbForms TEXT,
+                        relatedWords TEXT, userId TEXT,
+                        cachedAt INTEGER, updatedAtTs INTEGER,
                         isFavorite INTEGER DEFAULT 0,
-                        createdAt TEXT,
-                        updatedAt TEXT
+                        createdAt TEXT, updatedAt TEXT
                     );
                     
                     CREATE TABLE IF NOT EXISTS resources (
                         id TEXT PRIMARY KEY,
                         title TEXT NOT NULL,
                         description TEXT,
-                        imageUrl TEXT,
-                        thumbnailUrl TEXT,
-                        link TEXT,
-                        type TEXT,
-                        userId TEXT,
-                        cachedAt INTEGER,
-                        updatedAtTs INTEGER,
+                        imageUrl TEXT, thumbnailUrl TEXT,
+                        link TEXT, type TEXT, userId TEXT,
+                        cachedAt INTEGER, updatedAtTs INTEGER,
                         isBookmarked INTEGER DEFAULT 0,
-                        createdAt TEXT,
-                        updatedAt TEXT
+                        createdAt TEXT, updatedAt TEXT
                     );
 
                     CREATE TABLE IF NOT EXISTS sync_metadata (
                         collection TEXT PRIMARY KEY,
-                        lastSync INTEGER,
-                        itemCount INTEGER
+                        lastSync INTEGER, itemCount INTEGER
                     );
 
                     CREATE TABLE IF NOT EXISTS learning_progress (
@@ -91,7 +87,7 @@ export const initDatabase = async () => {
 
                     CREATE TABLE IF NOT EXISTS search_cache (
                         query TEXT PRIMARY KEY,
-                        result TEXT, -- JSON string
+                        result TEXT,
                         updatedAt INTEGER
                     );
                 `);
@@ -99,28 +95,32 @@ export const initDatabase = async () => {
                 // Indexes
                 await _db.execAsync(`
                     CREATE INDEX IF NOT EXISTS idx_vocab_english ON vocabularies(english);
-                    CREATE INDEX IF NOT EXISTS idx_vocab_pos ON vocabularies(partOfSpeech);
                     CREATE INDEX IF NOT EXISTS idx_vocab_updated ON vocabularies(updatedAtTs);
                     CREATE INDEX IF NOT EXISTS idx_resource_updated ON resources(updatedAtTs);
                     CREATE INDEX IF NOT EXISTS idx_progress_next ON learning_progress(nextReview);
                 `);
             });
 
-            // Only set the global shared DB instance AFTER everything is 100% ready
-            db = _db;
-            console.log('✅ SQLite Database fully initialized and ready (WAL mode)');
+            dbInstance = _db;
+            db = _db; // Backward compatibility
+            console.log('✅ SQLite Database Engine Ready (WAL Mode Enabled)');
+            return _db;
         } catch (error) {
-            console.error('❌ Error initializing SQLite database:', error);
-            initPromise = null;
+            console.error('❌ Failed to initialize SQLite Engine:', error);
+            initializationPromise = null;
             throw error;
         }
     })();
 
-    return initPromise;
+    return initializationPromise;
 };
 
-// Queue for database write operations - ensures single-threaded write access
-// Even with WAL mode, only one process should write at a time for maximum safety.
+// Backward compatible initDatabase for RootLayout
+export const initDatabase = async () => {
+    await getDatabase();
+};
+
+// Queue for database write operations - strictly serialized
 type QueueTask = () => Promise<any>;
 const writeQueue: QueueTask[] = [];
 let isProcessingQueue = false;
@@ -133,8 +133,8 @@ const processQueue = async () => {
         const task = writeQueue.shift();
         if (task) {
             try {
-                // Ensure the database is initialized before any task runs
-                if (!db) await initDatabase();
+                // Guaranteed safety: Wait for DB to be 100% configured
+                await getDatabase();
                 await task();
             } catch (error) {
                 console.error('❌ SQLite Queue execution error:', error);
@@ -778,9 +778,8 @@ export const getBookmarkResourceIds = async (): Promise<string[]> => {
 
 // ===== SRS SESSION LOGIC =====
 
-export const getVocabulariesForSession = async (limit: number = 50, mode: 'mixed' | 'new' | 'review' | 'hardest' = 'mixed'): Promise<VocabularyType[]> => {
-    if (!db) await initDatabase();
-    if (!db) return [];
+export const getVocabulariesForSession = async (limit: number = 0, mode: 'mixed' | 'new' | 'review' | 'hardest' = 'mixed'): Promise<VocabularyType[]> => {
+    const _db = await getDatabase();
 
     try {
         const now = Date.now();
@@ -794,15 +793,15 @@ export const getVocabulariesForSession = async (limit: number = 50, mode: 'mixed
             queryStr += ' LEFT JOIN learning_progress p ON v.id = p.vocabularyId WHERE p.vocabularyId IS NULL ORDER BY RANDOM()';
         } else if (mode === 'hardest') {
             queryStr += ' INNER JOIN learning_progress p ON v.id = p.vocabularyId WHERE p.isDifficult = 1 OR p.easeFactor < 2.0 ORDER BY p.easeFactor ASC';
-        } else {
-            // Mixed: Some due cards, some new cards
-            const dueRows: any[] = await db!.getAllAsync(
+        } else if (limit > 0) {
+            // Mixed with limit
+            const dueRows: any[] = await _db.getAllAsync(
                 'SELECT v.id FROM vocabularies v INNER JOIN learning_progress p ON v.id = p.vocabularyId WHERE p.nextReview <= ? ORDER BY p.nextReview ASC LIMIT ?',
                 [now, Math.floor(limit / 2)]
             );
             const dueIds = dueRows.map(r => r.id);
 
-            const newRows: any[] = await db!.getAllAsync(
+            const newRows: any[] = await _db.getAllAsync(
                 'SELECT v.id FROM vocabularies v LEFT JOIN learning_progress p ON v.id = p.vocabularyId WHERE p.vocabularyId IS NULL ORDER BY RANDOM() LIMIT ?',
                 [limit - dueIds.length]
             );
@@ -813,10 +812,17 @@ export const getVocabulariesForSession = async (limit: number = 50, mode: 'mixed
 
             queryStr += ` WHERE v.id IN (${allIds.map(() => '?').join(',')})`;
             params = allIds;
+        } else {
+            // Default: "mixed" but with NO limit (Load ALL cached vocabularies)
+            // Just return everything shuffled
+            queryStr += ' ORDER BY RANDOM()';
         }
 
-        queryStr += ` LIMIT ${limit}`;
-        const rows: any[] = await db!.getAllAsync(queryStr, params);
+        if (limit > 0) {
+            queryStr += ` LIMIT ${limit}`;
+        }
+
+        const rows: any[] = await _db.getAllAsync(queryStr, params);
 
         return rows.map(v => ({
             id: v.id,

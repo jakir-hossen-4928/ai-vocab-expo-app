@@ -390,7 +390,7 @@ export const removeFromBookmarks = async (resourceId: string) => Storage.removeB
 export const getBookmarkedResources = async (): Promise<Resource[]> => Storage.getBookmarkedResourcesData();
 export const isBookmarked = async (resourceId: string): Promise<boolean> => Storage.isBookmarked(resourceId);
 
-export const getFlashcards = async (limit: number = 50, mode: 'mixed' | 'new' | 'review' | 'hardest' = 'mixed') => {
+export const getFlashcards = async (limit: number = 0, mode: 'mixed' | 'new' | 'review' | 'hardest' = 'mixed') => {
     return getVocabulariesForSession(limit, mode);
 };
 
