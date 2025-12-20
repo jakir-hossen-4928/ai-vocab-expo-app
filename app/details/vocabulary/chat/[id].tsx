@@ -1,6 +1,7 @@
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { getVocabularyById } from '@/services/api';
+import { chatWithVocabulary } from '@/services/openRouterService';
 import { getAIModel, getChatSession, getOpenRouterApiKey, saveChatSession } from '@/services/storage';
 import { Vocabulary } from '@/types';
 import { Ionicons } from '@expo/vector-icons';
@@ -17,7 +18,7 @@ import {
     TouchableOpacity,
     View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface Message {
     id: string;
@@ -37,6 +38,7 @@ export default function ChatScreen() {
     const [loading, setLoading] = useState(false);
     const [initializing, setInitializing] = useState(true);
     const flatListRef = useRef<FlatList>(null);
+    const insets = useSafeAreaInsets();
 
     useEffect(() => {
         if (id) {
@@ -172,6 +174,59 @@ export default function ChatScreen() {
         );
     };
 
+    const renderList = () => (
+        <FlatList
+            ref={flatListRef}
+            data={messages}
+            renderItem={renderMessage}
+            keyExtractor={(item) => item.id}
+            contentContainerStyle={styles.chatContent}
+            onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
+            onLayout={() => flatListRef.current?.scrollToEnd({ animated: true })}
+            maintainVisibleContentPosition={{
+                minIndexForVisible: 0,
+            }}
+        />
+    );
+
+    const renderInput = () => (
+        <View style={[
+            styles.inputContainer,
+            {
+                backgroundColor: colors.background,
+                borderTopColor: colors.border,
+                paddingBottom: Math.max(insets.bottom, 12)
+            }
+        ]}>
+            <TextInput
+                style={[
+                    styles.input,
+                    { backgroundColor: colors.surface, color: colors.text, borderColor: colors.border }
+                ]}
+                placeholder="Ask about this word..."
+                placeholderTextColor={colors.icon}
+                value={inputText}
+                onChangeText={setInputText}
+                multiline
+            />
+            <TouchableOpacity
+                style={[
+                    styles.sendButton,
+                    { backgroundColor: inputText.trim() ? colors.primary : colors.border },
+                    loading && { opacity: 0.7 }
+                ]}
+                onPress={handleSend}
+                disabled={!inputText.trim() || loading}
+            >
+                {loading ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                    <Ionicons name="send" size={20} color="#fff" />
+                )}
+            </TouchableOpacity>
+        </View>
+    );
+
     if (initializing) {
         return (
             <View style={[styles.container, { backgroundColor: colors.background, justifyContent: 'center', alignItems: 'center' }]}>
@@ -181,7 +236,7 @@ export default function ChatScreen() {
     }
 
     return (
-        <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top', 'bottom', 'left', 'right']}>
+        <SafeAreaView style={[styles.container, { backgroundColor: colors.background }]} edges={['top', 'left', 'right']}>
             <View style={styles.header}>
                 <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
                     <Ionicons name="arrow-back" size={24} color={colors.text} />
@@ -200,48 +255,12 @@ export default function ChatScreen() {
             </View>
 
             <KeyboardAvoidingView
-                behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+                behavior="padding"
                 style={{ flex: 1 }}
-                keyboardVerticalOffset={Platform.OS === 'ios' ? 100 : 0}
+                keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 20}
             >
-                <FlatList
-                    ref={flatListRef}
-                    data={messages}
-                    renderItem={renderMessage}
-                    keyExtractor={(item) => item.id}
-                    contentContainerStyle={styles.chatContent}
-                    onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
-                    onLayout={() => flatListRef.current?.scrollToEnd({ animated: true })}
-                />
-
-                <View style={[styles.inputContainer, { backgroundColor: colors.background, borderTopColor: colors.border }]}>
-                    <TextInput
-                        style={[
-                            styles.input,
-                            { backgroundColor: colors.surface, color: colors.text, borderColor: colors.border }
-                        ]}
-                        placeholder="Ask about this word..."
-                        placeholderTextColor={colors.icon}
-                        value={inputText}
-                        onChangeText={setInputText}
-                        multiline
-                    />
-                    <TouchableOpacity
-                        style={[
-                            styles.sendButton,
-                            { backgroundColor: inputText.trim() ? colors.primary : colors.border },
-                            loading && { opacity: 0.7 }
-                        ]}
-                        onPress={handleSend}
-                        disabled={!inputText.trim() || loading}
-                    >
-                        {loading ? (
-                            <ActivityIndicator size="small" color="#fff" />
-                        ) : (
-                            <Ionicons name="send" size={20} color="#fff" />
-                        )}
-                    </TouchableOpacity>
-                </View>
+                {renderList()}
+                {renderInput()}
             </KeyboardAvoidingView>
         </SafeAreaView>
     );

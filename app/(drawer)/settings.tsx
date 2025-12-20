@@ -7,15 +7,14 @@ import Slider from '@react-native-community/slider';
 import * as Speech from 'expo-speech';
 import React, { useEffect, useState } from 'react';
 import {
-    ActivityIndicator,
     Alert,
+    Linking,
     ScrollView,
     StyleSheet,
     Text,
     TextInput,
     TouchableOpacity,
-    View,
-    Linking,
+    View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -34,18 +33,31 @@ export default function SettingsScreen() {
     const [selectedVoice, setSelectedVoice] = useState<string | undefined>(undefined);
 
     const availableModels = [
-        { id: "google/gemma-2-9b-it:free", name: "Gemma 2 9B (Free)", description: "Free model" },
-        { id: "x-ai/grok-4.1-fast:free", name: "Grok 4.1 Fast (Free)", description: "Free model" },
-        { id: "tngtech/deepseek-r1t2-chimera:free", name: "Deepseek R1t2 Chimera (Free)", description: "Free model" },
-        { id: "kwaipilot/kat-coder-pro:free", name: "Kat Coder Pro (Free)", description: "Free model" },
-        { id: "tngtech/deepseek-r1t-chimera:free", name: "Deepseek R1t Chimera (Free)", description: "Free model" },
-        { id: "z-ai/glm-4.5-air:free", name: "GLM 4.5 Air (Free)", description: "Free model" },
-        { id: "nvidia/nemotron-nano-12b-v2-vl:free", name: "Nemotron Nano 12B v2 VL (Free)", description: "Free model" },
-        { id: "qwen/qwen3-coder:free", name: "Qwen 3 Coder (Free)", description: "Free model" },
-        { id: "google/gemma-3-27b-it:free", name: "Gemma 3 27B IT (Free)", description: "Free model" },
-        { id: "openai/gpt-oss-20b:free", name: "GPT OSS 20B (Free)", description: "Free model" },
-        { id: "meta-llama/llama-3.3-70b-instruct:free", name: "Llama 3.3 70B Instruct (Free)", description: "Free model" },
-        { id: "moonshotai/kimi-k2:free", name: "Kimi K2 (Free)", description: "Free model" },
+        {
+            id: "meta-llama/llama-3.3-70b-instruct:free",
+            name: "Llama 3.3 70B Instruct (Free)",
+            description: "Best overall quality, clean output"
+        },
+        {
+            id: "z-ai/glm-4.5-air:free",
+            name: "GLM 4.5 Air (Free)",
+            description: "Fast, concise, low token usage"
+        },
+        {
+            id: "openai/gpt-oss-20b:free",
+            name: "GPT OSS 20B (Free)",
+            description: "Very stable instruction following"
+        },
+        {
+            id: "moonshotai/kimi-k2:free",
+            name: "Kimi K2 (Free)",
+            description: "Clear explanations, minimal verbosity"
+        },
+        {
+            id: "kwaipilot/kat-coder-pro:free",
+            name: "Kat Coder Pro (Free)",
+            description: "Surprisingly clean for short answers"
+        }
     ];
 
     useEffect(() => {
