@@ -104,6 +104,16 @@ export const getDatabase = async (): Promise<SQLite.SQLiteDatabase> => {
             dbInstance = _db;
             db = _db; // Backward compatibility
             console.log('✅ SQLite Database Engine Ready (WAL Mode Enabled)');
+
+            // Log current counts for debugging
+            try {
+                const vocabCountRow: any = await _db.getFirstAsync('SELECT COUNT(*) as count FROM vocabularies');
+                const resourceCountRow: any = await _db.getFirstAsync('SELECT COUNT(*) as count FROM resources');
+                console.log(`📊 DB Stats: ${vocabCountRow?.count || 0} vocabularies, ${resourceCountRow?.count || 0} resources`);
+            } catch (e) {
+                console.warn('Could not fetch DB stats:', e);
+            }
+
             return _db;
         } catch (error) {
             console.error('❌ Failed to initialize SQLite Engine:', error);
@@ -170,7 +180,14 @@ export const cacheVocabularies = async (vocabularies: VocabularyType[]) => {
             const now = Date.now();
             await db!.withTransactionAsync(async () => {
                 for (const v of vocabularies) {
-                    const updatedAtTs = new Date(v.updatedAt || v.updated_at || v.createdAt || v.created_at || now).getTime();
+                    const rawDate = v.updatedAt || v.updated_at || v.createdAt || v.created_at || now;
+                    let updatedAtTs = now;
+                    try {
+                        updatedAtTs = new Date(rawDate).getTime();
+                        if (isNaN(updatedAtTs)) updatedAtTs = now;
+                    } catch (e) {
+                        updatedAtTs = now;
+                    }
 
                     await db!.runAsync(
                         `INSERT OR REPLACE INTO vocabularies (

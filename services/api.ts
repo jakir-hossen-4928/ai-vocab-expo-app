@@ -84,6 +84,8 @@ export const syncVocabularies = async (options?: { limit?: number, initialBatchO
             const isInitialSyncDone = await Storage.getInitialSyncDone();
             const latestTs = await getLatestUpdatedTimestamp('vocabularies');
 
+            console.log(`🔄 Sync Start - InitialSyncDone: ${isInitialSyncDone}, LatestTs: ${latestTs}`);
+
             // DELTA SYNC: If we are fully synced and have a timestamp, just get updates since latest
             if (isInitialSyncDone && latestTs) {
                 console.log('🔄 Checking for vocabulary updates since:', latestTs);

@@ -1,3 +1,4 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 
 // Keys
@@ -291,7 +292,7 @@ const INITIAL_SYNC_COMPLETE_KEY = 'initial_sync_complete_v1';
 
 export const getInitialSyncDone = async (): Promise<boolean> => {
     try {
-        const val = await SecureStore.getItemAsync(INITIAL_SYNC_COMPLETE_KEY);
+        const val = await AsyncStorage.getItem(INITIAL_SYNC_COMPLETE_KEY);
         return val === 'true';
     } catch (error) {
         return false;
@@ -300,7 +301,7 @@ export const getInitialSyncDone = async (): Promise<boolean> => {
 
 export const setInitialSyncDone = async (done: boolean): Promise<boolean> => {
     try {
-        await SecureStore.setItemAsync(INITIAL_SYNC_COMPLETE_KEY, done ? 'true' : 'false');
+        await AsyncStorage.setItem(INITIAL_SYNC_COMPLETE_KEY, done ? 'true' : 'false');
         return true;
     } catch (error) {
         console.error('Error setting initial sync flag:', error);
