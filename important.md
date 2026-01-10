@@ -1,0 +1,1 @@
+npm install --global eas-cli && eas init --id dbf2bab4-6d47-4159-8f4e-d90a458e46ba && eas build -p android --profile apk 
