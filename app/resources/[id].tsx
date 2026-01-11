@@ -31,8 +31,9 @@ export default function ResourceDetailsScreen() {
     const handleShare = async () => {
         if (!resource) return;
         try {
+            const shareUrl = `https://ai-vocabulary-coach.netlify.app/resources/${resource.slug || resource.id}`;
             await Share.share({
-                message: `Check out this resource: ${resource.title}`,
+                message: `Check out this resource: ${resource.title}\n${shareUrl}`,
             });
         } catch (error) {
             console.error(error);
