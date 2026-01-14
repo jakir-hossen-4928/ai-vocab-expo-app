@@ -8,6 +8,11 @@
     "scheme": "aivocab",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/images/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.aivocab.app"
@@ -35,22 +40,9 @@
     },
     "plugins": [
       "expo-router",
-      [
-        "expo-splash-screen",
-        {
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
-          "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
-          "dark": {
-            "backgroundColor": "#121212"
-          }
-        }
-      ],
       "expo-sqlite",
       "expo-secure-store",
       "expo-web-browser",
-      "@react-native-community/datetimepicker",
       "expo-font"
     ],
     "experiments": {
