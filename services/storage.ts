@@ -365,3 +365,27 @@ export const getLastStudyDate = async (): Promise<string | null> => {
         return null;
     }
 };
+
+// ===== SYNC TIME TRACKING =====
+
+const LAST_SYNC_TIME_PREFIX = 'last_sync_time_';
+
+export const getLastSyncTime = async (collection: string): Promise<number | null> => {
+    try {
+        const val = await AsyncStorage.getItem(`${LAST_SYNC_TIME_PREFIX}${collection}`);
+        return val ? parseInt(val, 10) : null;
+    } catch (error) {
+        return null;
+    }
+};
+
+export const setLastSyncTime = async (collection: string, timestamp: number): Promise<boolean> => {
+    try {
+        await AsyncStorage.setItem(`${LAST_SYNC_TIME_PREFIX}${collection}`, String(timestamp));
+        return true;
+    } catch (error) {
+        console.error('Error setting last sync time:', error);
+        return false;
+    }
+};
+

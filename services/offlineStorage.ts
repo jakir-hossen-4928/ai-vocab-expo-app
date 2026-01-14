@@ -270,11 +270,11 @@ export const getCachedVocabularies = async (options?: { partOfSpeech?: string; s
             queryStr += ' WHERE ' + conditions.join(' AND ');
         }
 
-        // Sorting
+        // Sorting - Show latest added first (by createdAt)
         if (options?.onlyFavorites) {
-            queryStr += ' ORDER BY updatedAtTs DESC';
+            queryStr += ' ORDER BY updatedAtTs DESC'; // Favorites by last updated
         } else {
-            queryStr += ' ORDER BY updatedAtTs DESC, id ASC';
+            queryStr += ' ORDER BY createdAt DESC, id DESC'; // Latest added first
         }
 
         const rows: any[] = await db.getAllAsync(queryStr, params);
@@ -421,11 +421,11 @@ export const getCachedResources = async (options?: { search?: string; onlyBookma
             queryStr += ' WHERE ' + conditions.join(' AND ');
         }
 
-        // Sorting
+        // Sorting - Show latest added first (by createdAt)
         if (options?.onlyBookmarks) {
-            queryStr += ' ORDER BY updatedAtTs DESC';
+            queryStr += ' ORDER BY updatedAtTs DESC'; // Bookmarks by last updated
         } else {
-            queryStr += ' ORDER BY updatedAtTs DESC, id ASC';
+            queryStr += ' ORDER BY createdAt DESC, id DESC'; // Latest added first
         }
 
         const rows: any[] = await db.getAllAsync(queryStr, params);
